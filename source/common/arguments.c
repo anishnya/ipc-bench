@@ -13,6 +13,7 @@ void print_usage() {
 			"Usage: fifos "
 			"-s/--size <bytes> "
 			"-c/--count <number>"
+			"-r/--rate <number>"
 			"\n");
 	exit(EXIT_FAILURE);
 }
@@ -30,12 +31,14 @@ void parse_arguments(Arguments *arguments, int argc, char *argv[]) {
 	// Default values
 	arguments->size = DEFAULT_MESSAGE_SIZE;
 	arguments->count = 1000;
+	arguments->rate = arguments->count; // dump all messages at once
 
 	// Command line arguments
 	// clang-format off
 	static struct option long_options[] = {
 			{"size",  required_argument, NULL, 's'},
 			{"count", required_argument, NULL, 'c'},
+			{"rate", required_argument, NULL, 'r'},
 			{0,       0,                 0,     0}
 	};
 	// clang-format on
@@ -47,6 +50,7 @@ void parse_arguments(Arguments *arguments, int argc, char *argv[]) {
 			case -1: return;
 			case 's': arguments->size = atoi(optarg); break;
 			case 'c': arguments->count = atoi(optarg); break;
+			case 'r': arguments->rate = atoi(optarg); break;
 			default: continue;
 		}
 	}

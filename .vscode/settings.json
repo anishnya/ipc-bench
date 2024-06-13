@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "atomic": "c",
+        "rateguard.h": "c",
+        "kernel-page-flags.h": "c",
+        "utility.h": "c"
+    }
+}

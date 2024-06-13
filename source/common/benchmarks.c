@@ -43,24 +43,75 @@ void benchmark(Benchmarks* bench) {
 	bench->squared_sum += (time * time);
 }
 
+void benchmarkCon(Benchmarks* bench, bench_t startTime) {
+	const bench_t time = now() - startTime;
+	if (time < bench->minimum) {
+		bench->minimum = time;
+	}
+
+	if (time > bench->maximum) {
+		bench->maximum = time;
+	}
+
+	bench->sum += time;
+	bench->squared_sum += (time * time);
+}
+
 void evaluate(Benchmarks* bench, Arguments* args) {
 	assert(args->count > 0);
+	const double average = (((double)bench->sum) / args->count);
+
+	printf("Latency:   %.3f\tus\n", average / 1000.0);
+}
+
+void evaluateClient(bench_t *diffs, Arguments* args) {
+	assert(args->count > 0);
+	double sum = 0;
+	for (size_t i = 0; i < args->count; ++i) {
+		sum += (double)diffs[i];
+	}
+
+	const double average = sum / args->count;
+	printf("Latency:   %.3f\tus\n", average / 1000.0);
+}
+
+void evaluateServer(Benchmarks *bench, size_t numReqs) {
 	const bench_t total_time = now() - bench->total_start;
-	const double average = ((double)bench->sum) / args->count;
-
-	double sigma = bench->squared_sum / args->count;
-	sigma = sqrt(sigma - (average * average));
-
-	int messageRate = (int)(args->count / (total_time / 1e9));
-
-	printf("\n============ RESULTS ================\n");
-	printf("Message size:       %d\n", args->size);
-	printf("Message count:      %d\n", args->count);
-	printf("Total duration:     %.3f\tms\n", total_time / 1e6);
-	printf("Average duration:   %.3f\tus\n", average / 1000.0);
-	printf("Minimum duration:   %.3f\tus\n", bench->minimum / 1000.0);
-	printf("Maximum duration:   %.3f\tus\n", bench->maximum / 1000.0);
-	printf("Standard deviation: %.3f\tus\n", sigma / 1000.0);
+	int messageRate = (int)(numReqs / (total_time / 1e9));
 	printf("Message rate:       %d\tmsg/s\n", messageRate);
-	printf("=====================================\n");
+}
+
+// Optional comparison function for qsort (ascending order)
+int compar(const void *a, const void *b) {
+  return (*(bench_t*)a - *(bench_t*)b);
+}
+
+
+void calculate_average_and_percentile(bench_t *data, size_t size) {
+	// Calculate the average
+	double sum = 0.0;
+	for (size_t i = 0; i < size; i++) {
+		sum += data[i];
+	}
+  	
+	double average = sum / size;
+	printf("Latency:   %.3f\tus\n", average / 1000.0);
+	return;
+  	
+	// Sort the array to find the percentile value
+ 	qsort(data, size, sizeof(bench_t), (int (*)(const void*, const void*))compar);
+
+ 	 // Calculate the index for the 99th percentile
+  	size_t percentile_index = (int)((99.0 / 100.0) * size);
+
+  	// Handle edge cases for small arrays
+	if (percentile_index == size) {
+		percentile_index = size - 1; // Use the last element for 100th percentile
+	} else if (percentile_index == 0) {
+		percentile_index = 0; // Use the first element for 0th percentile
+	}
+
+  	// Return the 99th percentile value
+	printf("P99 Latency:   %.3f\tus\n", (double)data[percentile_index] / 1000.0);
+  	return;
 }

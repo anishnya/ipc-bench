@@ -2,9 +2,10 @@
 ## TARGETS
 ###########################################################
 
-add_executable(fifo-client client.c)
-add_executable(fifo-server server.c)
+add_executable(fifo-client client.c helper.c)
+add_executable(fifo-server server.c helper.c)
 add_executable(fifo fifo.c)
+
 
 ###########################################################
 ## COMMON

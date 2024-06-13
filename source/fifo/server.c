@@ -1,87 +1,107 @@
+#define _GNU_SOURCE
+#include <poll.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
+#include <string.h>
 #include <unistd.h>
-#include <unistd.h>
+#include <pthread.h>
 
 #include "common/common.h"
+#include "fifo/helper.h"
+#include "common/rateGuard.h"
+#include <sys/select.h>
+#include <fcntl.h>
 
-#define FIFO_PATH "/tmp/ipc_bench_fifo"
+#define READ_FIFO_PATH "/tmp/ipc_bench_fifo_write"
+#define WRITE_FIFO_PATH "/tmp/ipc_bench_fifo_read"
 
-void cleanup(FILE* stream, void* buffer) {
+void cleanup(int stream, void *buffer) {
 	free(buffer);
-	fclose(stream);
-	if (remove(FIFO_PATH) == -1) {
-		throw("Error removing FIFO");
-	}
+	close(stream);
 }
 
-void communicate(FILE* stream,
-								 struct Arguments* args,
-								 struct sigaction* signal_action) {
+bool checkPoll(struct pollfd* pfds, int timeToWait) {
+	int ret = poll(pfds, 2, timeToWait);
+	if (ret == -1) {
+		throw("error");
+	}
+
+	return true;
+}
+
+void communicate(int readStream, int writeStream,
+								 struct Arguments *args,
+								 struct sigaction *signal_action) {
+	
+	void *readBuffer = malloc(args->size * args->rate);
+
+	size_t reqsServed = 0;
+
 	struct Benchmarks bench;
-	int message;
-	void* buffer;
-
-	buffer = malloc(args->size);
 	setup_benchmarks(&bench);
-
 	wait_for_signal(signal_action);
+	
+	struct pollfd *pfds;
+	pfds = (struct pollfd*)malloc(2 * sizeof(struct pollfd));
 
-	for (message = 0; message < args->count; ++message) {
-		bench.single_start = now();
+	// See if we can read anything
+	pfds[0].fd = readStream;
+ 	pfds[0].events = POLLIN;
 
-		if (fwrite(buffer, args->size, 1, stream) == 0) {
-			throw("Error writing buffer");
+	// See if we can write anything
+  	pfds[1].fd = writeStream;
+  	pfds[1].events = POLLOUT;
+
+	while(reqsServed < args->count) {
+		// Read and send as much as possible
+		if(checkPoll(pfds, 0) && (pfds[0].revents && POLLIN) && (pfds[0].revents && POLLOUT)) {
+			read_from_pipe(readBuffer, readStream, sizeof(bench_t) + args->size);
+			write_to_pipe(readBuffer, writeStream, sizeof(bench_t) + args->size);
+			reqsServed++;
 		}
-		// Send off immediately (for small buffers)
-		fflush(stream);
-
-		notify_client();
-		wait_for_signal(signal_action);
-
-		benchmark(&bench);
 	}
-
-	evaluate(&bench, args);
-	cleanup(stream, buffer);
+	
+	evaluateServer(&bench, reqsServed);
+	cleanup(readStream, readBuffer);
+	close(writeStream);
 }
 
-FILE* open_fifo() {
-	FILE* stream;
-
-	// Just in case it already exists
-	//(void)remove(FIFO_PATH);
-
-	// Create a FIFO object. Note that a FIFO is
-	// really just a special file, which must be
-	// opened by one process and to which then
-	// both server and client can write using standard
-	// c i/o functions. 0666 specifies read+write
-	// access permissions for the user, group and world
-	if (mkfifo(FIFO_PATH, 0666) > 0) {
+int open_fifo(const char* path, struct Arguments *args) {
+	int fd;
+	
+	fd = mkfifo(path, 0666);
+	if (fd > 0) {
 		throw("Error creating FIFO");
 	}
 
-	// Tell the client the fifo now exists and
-	// can be opened from the read end
-	notify_client();
+	fd = open(path, O_RDWR);
 
-	// Because a fifo is really just a file, we can
-	// open a normal FILE* stream to it (in write mode)
-	// Note that this call will block until the read-end
-	// is opened by the client
-	if ((stream = fopen(FIFO_PATH, "w")) == NULL) {
-		throw("Error opening descriptor to FIFO on server side");
-	}
+	// Use fcntl to set the pipe size on the opened file descriptor
+  	int result = fcntl(fd, F_SETFL, O_NONBLOCK, F_SETPIPE_SZ, 102400);
+	if (result == -1) {
+		perror("fcntl");
+		exit(1);
+  	}	
 
-	return stream;
+	return fd;
 }
 
 int main(int argc, char* argv[]) {
-	// The file pointer we will associate with the FIFO
-	FILE* stream;
+	// cpu_set_t cpuset;  // Set of CPUs
+  	// CPU_ZERO(&cpuset);  // Initialize the set to empty
+
+	// // Set the CPU affinity to core 1 (second core)
+	// CPU_SET(0, &cpuset);
+
+	// if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
+	// 	perror("sched_setaffinity");
+	// 	exit(1);
+	// }
+	// The file pointers we will associate with the FIFO
+	int clientWriteStream;
+	int clientReadStream;
+
 	// For server/client signals
 	struct sigaction signal_action;
 
@@ -89,9 +109,13 @@ int main(int argc, char* argv[]) {
 	parse_arguments(&args, argc, argv);
 
 	setup_server_signals(&signal_action);
-	stream = open_fifo();
 
-	communicate(stream, &args, &signal_action);
+	clientReadStream = open_fifo(READ_FIFO_PATH, &args);
+	clientWriteStream = open_fifo(WRITE_FIFO_PATH, &args);
+
+	// Tell client both pipes have been set up
+	notify_client();
+	communicate(clientReadStream, clientWriteStream, &args, &signal_action);
 
 	return EXIT_SUCCESS;
 }

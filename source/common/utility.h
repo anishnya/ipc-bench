@@ -1,3 +1,7 @@
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef IPC_BENCH_UTILITY_H
 #define IPC_BENCH_UTILITY_H
 
@@ -62,3 +66,7 @@ int timeval_to_milliseconds(const struct timeval* time);
 void pin_thread(int where);
 
 #endif /* IPC_BENCH_UTILITY_H */
+
+#ifdef __cplusplus
+}
+#endif

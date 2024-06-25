@@ -2,8 +2,8 @@
 ## TARGETS
 ###########################################################
 
-add_executable(domain-client client.c)
-add_executable(domain-server server.c)
+add_executable(domain-client client.c helper.c)
+add_executable(domain-server server.c helper.c)
 add_executable(domain domain.c)
 
 ###########################################################

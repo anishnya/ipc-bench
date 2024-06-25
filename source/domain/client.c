@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,34 +8,156 @@
 
 #include "common/common.h"
 #include "common/sockets.h"
+#include "domain/helper.h"
+#include <sched.h>
 
-#define SOCKET_PATH "/tmp/ipc_bench_socket"
 
 void cleanup(int connection, void* buffer) {
 	close(connection);
 	free(buffer);
 }
 
-void communicate(int connection, struct Arguments* args, int busy_waiting) {
-	void* buffer = malloc(args->size);
+void resetPollStruct(struct pollfd* pfds, int readFD, int writeFD, short readEvent, short writeEvent) {
+	pfds[0].fd = readFD;
+	pfds[1].fd = writeFD;
+	pfds[0].events = readEvent;
+	pfds[1].events = writeEvent;
+	pfds[0].revents = 0;
+	pfds[1].revents = 0;
+}
 
-	for (; args->count > 0; --args->count) {
-		if (receive(connection, buffer, args->size, busy_waiting) == -1) {
-			throw("Error receiving on client-side");
+bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {
+	int ret = poll(pfds, numPolled, timeToWait);
+	if (ret == -1) {
+		throw("error");
+	}
+
+	return true;
+}
+
+void updateWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_t startIndex, size_t numToUpdate) {
+	size_t end = startIndex + numToUpdate; 
+	if (startIndex > totalTimes) {
+		return;
+	}
+	
+	if (startIndex + numToUpdate > totalTimes) {
+		end = totalTimes;
+	}
+
+	for (size_t i = startIndex; i < end; ++i) {
+		times[i] = time;
+	}
+
+	return;
+}
+
+void updateReadWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_t startIndex, size_t numToUpdate) {
+	size_t end = startIndex + numToUpdate; 
+	if (startIndex > totalTimes) {
+		return;
+	}
+	
+	if (startIndex + numToUpdate > totalTimes) {
+		end = totalTimes;
+	}
+	
+	for (size_t i = startIndex; i < end; ++i) {
+		times[i] = ((time - times[i]) / 1000);
+	}
+
+	return;	
+}
+
+void communicate(int connection, struct Arguments* args) {
+	size_t reqSize = args->size;
+	size_t bufferSize = reqSize * args->rate;
+	
+	void *readBuffer = malloc(bufferSize);
+	void *writeBuffer = malloc(bufferSize);
+	bench_t *times = malloc(sizeof(bench_t) * args->count); 
+
+	struct pollfd *pfds;
+	pfds = (struct pollfd*)malloc(1 * sizeof(struct pollfd));
+
+	// See if we can read anything
+	pfds[0].fd = connection;
+	pfds[0].events = POLLIN | POLLOUT;
+
+	struct Benchmarks bench;
+	setup_benchmarks(&bench);
+	
+	int wait = 0;
+	size_t outstandingBytes = 0;
+	size_t maxBytes = reqSize * args->count;
+	size_t maxOutstandingBytes = reqSize * args->rate;
+	ssize_t totalBytesRead = 0;
+	ssize_t totalBytesWritten = 0;
+
+	size_t maxOutstandingReqs = args->rate;
+	size_t numReqsRead = 0;
+	size_t numReqsSent = 0;
+	size_t outstandingReqs = 0;
+
+	while(totalBytesRead < maxBytes) {
+		checkPoll(pfds, 1, wait);
+		int canRead = (pfds[0].revents & POLLIN);
+		int canWrite = (pfds[0].revents & POLLOUT);
+		struct socketMetaData readInfo = {0, 0, 0, 0};
+		struct socketMetaData writeInfo = {0, 0, 0, 0};
+		size_t toUpdateRead = 0;
+
+		// Can Read
+		if (canRead) {
+			readInfo = read_from_socket(readBuffer, connection, reqSize, outstandingBytes, false);
+			outstandingBytes -= readInfo.totalBytes;
+			totalBytesRead += readInfo.totalBytes;
+
+			if (readInfo.wholeReqs > 0) {
+				outstandingReqs -= readInfo.wholeReqs;
+				toUpdateRead += readInfo.wholeReqs;
+			}
+
+			if (readInfo.spareBytes > 0 && ((totalBytesRead % reqSize) == 0)) {
+				outstandingReqs -= 1;
+				toUpdateRead += 1;
+			}
+
+			updateReadWriteTimes(now(), times, args->count, numReqsRead, toUpdateRead);
+			numReqsRead += toUpdateRead;
 		}
 
-		// Dummy operation
-		memset(buffer, '*', args->size);
+		if (outstandingReqs < maxOutstandingReqs) {
+			updateWriteTimes(now(), times, args->count, numReqsSent, (maxOutstandingReqs - outstandingReqs));
+			numReqsSent += (maxOutstandingReqs - outstandingReqs);
+		}
 
-		if (send(connection, buffer, args->size, 0) == -1) {
-			throw("Error sending on client-side");
+		// Can write
+		if (canWrite && outstandingBytes < maxOutstandingBytes) {
+			writeInfo = write_to_socket(writeBuffer, connection, reqSize, (maxOutstandingBytes - outstandingBytes), false);
+			outstandingBytes += writeInfo.totalBytes;
+			totalBytesWritten += writeInfo.totalBytes;
+			wait = -1;
+
+			if (writeInfo.wholeReqs > 0) {
+				outstandingReqs += writeInfo.wholeReqs;
+			}
+
+			if (writeInfo.spareBytes > 0 && ((totalBytesWritten % reqSize) == 0)) {
+				outstandingReqs += 1;
+			}
 		}
 	}
 
-	cleanup(connection, buffer);
+	// tell server we are done reading data
+	client_once(NOTIFY);
+	const bench_t elaspedTime = now() - bench.total_start;
+	printf("Total duration:     %lld\n", elaspedTime / 1000);
+	evaluateClient(times, args);
+	// cleanup(connection, buffer);
 }
 
-void setup_socket(int connection, int busy_waiting) {
+void setup_socket(int connection, char* socketPath) {
 	int return_code;
 
 	// The main datastructure for a UNIX-domain socket.
@@ -51,20 +174,14 @@ void setup_socket(int connection, int busy_waiting) {
 
 	set_socket_both_buffer_sizes(connection);
 
-	if (busy_waiting) {
-		// For domain sockets blocking or not seems to make no
-		// difference at all in terms of speed. Neither setting
-		// the timeout nor not blocking at all.
-		// adjust_socket_blocking_timeout(connection, 0, 1);
-		if (set_io_flag(connection, O_NONBLOCK) == -1) {
-			throw("Error setting socket to non-blocking on client-side");
-		}
-	}
+	// if (set_io_flag(connection, O_NONBLOCK) == -1) {
+	// 	throw("Error setting socket to non-blocking on client-side");
+	// }
 
 	// Set the family of the address struct
 	address.sun_family = AF_UNIX;
 	// Copy in the path
-	strcpy(address.sun_path, SOCKET_PATH);
+	strcpy(address.sun_path, socketPath);
 
 	// Connect the socket to an address.
 	// Arguments:
@@ -85,7 +202,7 @@ void setup_socket(int connection, int busy_waiting) {
 	}
 }
 
-int create_connection(int busy_waiting) {
+int create_connection(char* socketPath) {
 	// The connection socket (file descriptor) that we will return
 	int connection;
 
@@ -105,28 +222,31 @@ int create_connection(int busy_waiting) {
 		throw("Error opening socket on client-side");
 	}
 
-	setup_socket(connection, busy_waiting);
+	setup_socket(connection, socketPath);
 
 	return connection;
 }
 
 int main(int argc, char* argv[]) {
+	cpu_set_t cpuset;  // Set of CPUs
+  	CPU_ZERO(&cpuset);  // Initialize the set to empty
+	CPU_SET(1, &cpuset);
+
+	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
+		perror("sched_setaffinity");
+		exit(1);
+	}
+	
 	// File descriptor for the socket over which
 	// the communciation will happen with the client
 	int connection;
 
-	// Flag to determine whether or not to
-	// do busy-waiting and non-blocking calls
-	int busy_waiting;
-
 	// For command-line arguments
 	struct Arguments args;
-
-	busy_waiting = check_flag("busy", argc, argv);
 	parse_arguments(&args, argc, argv);
 
-	connection = create_connection(busy_waiting);
-	communicate(connection, &args, busy_waiting);
+	connection = create_connection(READ_SOCKET_PATH);
+	communicate(connection, &args);
 
 	return EXIT_SUCCESS;
 }

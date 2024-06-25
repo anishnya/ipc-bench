@@ -23,8 +23,14 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-void write_to_pipe(void *buffer, int stream, size_t num_bytes);
-void read_from_pipe(void *buffer, int stream, size_t num_bytes);
+struct pipeMetaData {
+    size_t wholeReqs;
+    size_t spareBytes;
+    size_t totalBytes;
+};
+
+struct pipeMetaData read_from_pipe(void *buffer, int stream, size_t chunk, size_t numBytesToRead);
+struct pipeMetaData write_to_pipe(void *buffer, int stream, size_t chunk, size_t numBytesToWrite);
 int maxPipeSize(struct Arguments *args);
 
 #endif

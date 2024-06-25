@@ -17,15 +17,14 @@
 #define READ_FIFO_PATH "/tmp/ipc_bench_fifo_read"
 #define WRITE_FIFO_PATH "/tmp/ipc_bench_fifo_write"
 
-atomic_llong outstandingReqs = 0;
 
 void cleanup(int stream, void *buffer) {
 	free(buffer);
 	close(stream);
 }
 
-bool checkPoll(struct pollfd* pfds, int timeToWait) {	
-	int ret = poll(pfds, 1, timeToWait);
+bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {	
+	int ret = poll(pfds, numPolled, timeToWait);
 	if (ret == -1) {
 		throw("error");
 	}
@@ -33,83 +32,134 @@ bool checkPoll(struct pollfd* pfds, int timeToWait) {
 	return true;
 }
 
-typedef struct {
-	void *readBuffer;
-	int readStream;
-	struct Arguments *args;
-	struct Benchmarks *bench;
-} readArgs;
-
-void *read_reqs(void *arg) {
-	readArgs *args = (readArgs *)arg;
-
-	struct pollfd *pfds;
-	pfds = (struct pollfd*)malloc(1 * sizeof(struct pollfd));
-	pfds[0].fd = args->readStream;
- 	pfds[0].events = POLLIN;
-	size_t numReqs = 0;
-	int waitTime = 0;
-
-	while(numReqs < args->args->count) {
-		checkPoll(pfds, waitTime);
-		if ((pfds[0].revents && POLLIN)) {
-			read_from_pipe(args->readBuffer, args->readStream, sizeof(bench_t) + args->args->size);
-			atomic_fetch_sub_explicit(&outstandingReqs, 1, memory_order_relaxed);
-			numReqs++;
-		}
+void updateWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_t startIndex, size_t numToUpdate) {
+	size_t end = startIndex + numToUpdate; 
+	if (startIndex > totalTimes) {
+		return;
+	}
+	
+	if (startIndex + numToUpdate > totalTimes) {
+		end = totalTimes;
 	}
 
-	args->bench->sum = now() - args->bench->total_start;
+	for (size_t i = startIndex; i < end; ++i) {
+		times[i] = time;
+	}
 
-    return NULL;
+	return;
 }
+
+void updateReadWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_t startIndex, size_t numToUpdate) {
+	size_t end = startIndex + numToUpdate; 
+	if (startIndex > totalTimes) {
+		return;
+	}
+	
+	if (startIndex + numToUpdate > totalTimes) {
+		end = totalTimes;
+	}
+	
+	for (size_t i = startIndex; i < end; ++i) {
+		// Prevent overflow
+		times[i] = ((time - times[i]) / 1000);
+	}
+
+	return;	
+}
+
 
 void communicate(int readStream, int writeStream,
 								 struct Arguments *args,
 								 struct sigaction *signal_action) {
 	
-	void *readBuffer = malloc(args->size + sizeof(bench_t));
-	memset(readBuffer, 1 << 6, args->size + sizeof(bench_t));
+	size_t reqSize = args->size;
+	size_t bufferSize = reqSize * args->rate;
 	
-	void *writeBuffer = malloc(args->size + sizeof(bench_t));
-	memset(writeBuffer, 1 << 6, args->size + sizeof(bench_t));
-	
+	void *readBuffer = malloc(bufferSize);
+	void *writeBuffer = malloc(bufferSize);
+	bench_t *times = malloc(sizeof(bench_t) * args->count); 
+
+	struct pollfd *pfds;
+	pfds = (struct pollfd*)malloc(2 * sizeof(struct pollfd));
+
+	// See if we can read anything
+	pfds[0].fd = readStream;
+	pfds[1].fd = writeStream;
+	pfds[0].events = POLLIN;
+ 	pfds[1].events = POLLOUT;
+
 	struct Benchmarks bench;
 	setup_benchmarks(&bench);
 
-	pthread_t thread;
-
-	struct pollfd *pfds;
-	pfds = (struct pollfd*)malloc(1 * sizeof(struct pollfd));
-
-	// See if we can read anything
-	pfds[0].fd = writeStream;
- 	pfds[0].events = POLLOUT;
-
 	notify_server(signal_action);
+	
+	int wait = 0;
+	size_t outstandingBytes = 0;
+	size_t maxBytes = reqSize * args->count;
+	size_t maxOutstandingBytes = reqSize * args->rate;
+	ssize_t totalBytesRead = 0;
+	ssize_t totalBytesWritten = 0;
 
-	readArgs toSend;
-	toSend.readBuffer = readBuffer;
-	toSend.readStream = readStream;
-	toSend.args = args;
-	toSend.bench = &bench;
-	
-	int writeWait = 0;
-	
-	size_t numReqs = 0;
-	pthread_create(&thread, NULL, read_reqs, &toSend);
-	
-	while(numReqs < args->count) {
-		// Write as much as I can before a read
-		if(checkPoll(pfds, writeWait) && (pfds[0].revents && POLLOUT) && atomic_load_explicit(&outstandingReqs, memory_order_acquire) < args->rate) {
-			write_to_pipe(writeBuffer, writeStream, sizeof(bench_t) + args->size);
-			atomic_fetch_add_explicit(&outstandingReqs, 1, memory_order_acq_rel);
-			numReqs++;
+	size_t maxOutstandingReqs = args->rate;
+	size_t numReqsRead = 0;
+	size_t numReqsSent = 0;
+	size_t outstandingReqs = 0;
+
+	bench.total_start = now();
+
+	while(totalBytesRead < maxBytes) {
+		checkPoll(pfds, 2, wait);
+		int canRead = pfds[0].revents & POLLIN;
+		int canWrite = pfds[1].revents & POLLOUT; 
+		struct pipeMetaData readInfo = {0, 0, 0};
+		struct pipeMetaData writeInfo = {0, 0, 0};
+		size_t toUpdateRead = 0;
+
+		// If you can read
+		if (canRead) {
+			readInfo = read_from_pipe(readBuffer, readStream, reqSize, outstandingBytes);
+			outstandingBytes -= readInfo.totalBytes;
+			totalBytesRead += readInfo.totalBytes;
+
+			if (readInfo.wholeReqs > 0) {
+				outstandingReqs -= readInfo.wholeReqs;
+				toUpdateRead += readInfo.wholeReqs;
+			}
+
+			if (readInfo.spareBytes > 0 && ((totalBytesRead % reqSize) == 0)) {
+				outstandingReqs -= 1;
+				toUpdateRead += 1;
+			}
+
+			updateReadWriteTimes(now(), times, args->count, numReqsRead, toUpdateRead);
+			numReqsRead += toUpdateRead;
+		}
+
+		if (outstandingReqs < maxOutstandingReqs) {
+			updateWriteTimes(now(), times, args->count, numReqsSent, (maxOutstandingReqs - outstandingReqs));
+			numReqsSent += (maxOutstandingReqs - outstandingReqs);
+		}
+
+		// Can write
+		if (canWrite && outstandingBytes < maxOutstandingBytes) {
+			writeInfo = write_to_pipe(writeBuffer, writeStream, reqSize, (maxOutstandingBytes - outstandingBytes));
+			outstandingBytes += writeInfo.totalBytes;
+			totalBytesWritten += writeInfo.totalBytes;
+			wait = -1;
+
+			if (writeInfo.wholeReqs > 0) {
+				outstandingReqs += writeInfo.wholeReqs;
+			}
+
+			if (writeInfo.spareBytes > 0 && ((totalBytesWritten % reqSize) == 0)) {
+				outstandingReqs += 1;
+			}
 		}
 	}
 	
-	pthread_join(thread, NULL);
-	evaluate(&bench, args);
+	const bench_t elaspedTime = now() - bench.total_start;
+	printf("Total duration:     %lld\n", elaspedTime / 1000);
+	evaluateClient(times, args);
 	cleanup(writeStream, writeBuffer);
 	cleanup(readStream, readBuffer);
 }
@@ -121,27 +171,31 @@ int open_fifo(const char* path) {
 	}
 
 	// Use fcntl to set the pipe size on the opened file descriptor
-  	int result = fcntl(fd, F_SETFL, O_NONBLOCK, F_SETPIPE_SZ, 102400);
+  	int result = fcntl(fd, F_SETPIPE_SZ, 102400);
 	if (result == -1) {
 		perror("fcntl");
 		exit(1);
-  	}	
+  	}
 
+	// result = fcntl(fd, F_SETFL, 0);
+	// if (result == -1) {
+	// 	perror("fcntl");
+	// 	exit(1);
+  	// }
 
 	return fd;
 }
 
 int main(int argc, char *argv[]) {
-	// cpu_set_t cpuset;  // Set of CPUs
-  	// CPU_ZERO(&cpuset);  // Initialize the set to empty
+	cpu_set_t cpuset;  // Set of CPUs
+  	CPU_ZERO(&cpuset);  // Initialize the set to empty
+	CPU_SET(1, &cpuset);
 
-	// // Set the CPU affinity to core 1 (second core)
-	// CPU_SET(1, &cpuset);
+	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
+		perror("sched_setaffinity");
+		exit(1);
+	}
 
-	// if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
-	// 	perror("sched_setaffinity");
-	// 	exit(1);
-	// }
 	// The file pointers we will associate with the FIFO
 	int clientWriteStream;
 	int clientReadStream;

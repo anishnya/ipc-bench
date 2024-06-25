@@ -31,7 +31,7 @@ void parse_arguments(Arguments *arguments, int argc, char *argv[]) {
 	// Default values
 	arguments->size = DEFAULT_MESSAGE_SIZE;
 	arguments->count = 1000;
-	arguments->rate = arguments->count; // dump all messages at once
+	arguments->rate = 100; // dump all messages at once
 
 	// Command line arguments
 	// clang-format off
@@ -44,7 +44,7 @@ void parse_arguments(Arguments *arguments, int argc, char *argv[]) {
 	// clang-format on
 
 	while (true) {
-		option = getopt_long(argc, argv, "+:s:c:", long_options, &long_index);
+		option = getopt_long(argc, argv, "+:s:c:r:", long_options, &long_index);
 
 		switch (option) {
 			case -1: return;

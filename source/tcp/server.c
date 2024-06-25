@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -7,11 +8,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "tcp/helper.h"
 #include "common/common.h"
 #include "common/sockets.h"
-
-#define PORT "6969"
-#define HOST "localhost"
 
 void print_address(struct addrinfo *address_info) {
 	char *type;
@@ -108,30 +107,15 @@ get_address(struct addrinfo *server_info, int *socket_descriptor) {
 	return valid_address;
 }
 
-void cleanup(int descriptor, void *buffer) {
+void cleanup(int descriptor) {
 	close(descriptor);
-	free(buffer);
 }
 
-void setup_socket(int socket_descriptor, int busy_waiting) {
+void setup_socket(int socket_descriptor) {
 	set_socket_both_buffer_sizes(socket_descriptor);
-
-	if (busy_waiting) {
-		// Note that adjusting the blocking timeout would only make sense
-		// if busy waiting is a lot faster than blocking but maybe requires
-		// too many CPU resources, so we'd find a trade-off for a short polling
-		// time that mixes busy waiting with blocking. However, as it seems
-		// that busy waiting is slower, setting the timeout is not effective at
-		// all (setting the timeout to a small value like 10 microseconds
-		// does make it faster than plain busy waiting, though.)
-		// adjust_socket_blocking_timeout(socket_descriptor, 0, 10);
-		if (set_io_flag(socket_descriptor, O_NONBLOCK) == -1) {
-			throw("Error setting socket to non-blocking on server-side");
-		}
-	}
 }
 
-int accept_communication(int socket_descriptor, int busy_waiting) {
+int accept_communication(int socket_descriptor) {
 	// Data type big enough to hold both an sockaddr_in and sockaddr_in6 structure
 	// The ai_addr structure contained in the addrinfo struct can point to either
 	// an IPv4 sockaddr_in or an IPv6 sockaddr_in6 struct. Sometimes, we don't
@@ -151,6 +135,7 @@ int accept_communication(int socket_descriptor, int busy_waiting) {
 	// could then just fork off a child to handle the client
 	// and start accepting new clients on the socket_descriptor
 	// clang-format off
+
 	int connection = accept(
 		socket_descriptor,
 		(struct sockaddr *)&other_address,
@@ -162,42 +147,59 @@ int accept_communication(int socket_descriptor, int busy_waiting) {
 		throw("Error accepting");
 	}
 
-	setup_socket(connection, busy_waiting);
+	
+	setup_socket(connection);
 
 	// Don't need the main server descriptor anymore at this
 	// point because we'll only communicate to the one client
 	// for this benchmark.
 	close(socket_descriptor);
 
+
 	return connection;
 }
 
-void communicate(int descriptor, struct Arguments *args, int busy_waiting) {
+void communicate(int descriptor, struct Arguments *args) {
+	size_t reqSize = args->size;
+	size_t bufferSize = reqSize * args->rate;
+	void *readBuffer = malloc(bufferSize);
+
 	struct Benchmarks bench;
-	void *buffer;
-	int message;
-
 	setup_benchmarks(&bench);
-	buffer = malloc(args->size);
 
-	for (message = 0; message < args->count; ++message) {
-		bench.single_start = now();
+	ssize_t outstandingBytes = 0;
+	ssize_t maxOutstandingBytes = reqSize * args->rate;
+	ssize_t maxBytes = reqSize * args->count;
+	ssize_t totalBytesRead = 0;
+	ssize_t totalBytesWritten = 0;
 
-		// Send to the client
-		if (send(descriptor, buffer, args->size, 0) == -1) {
-			throw("Error sending from server");
+	while(totalBytesWritten < maxBytes) {
+		struct socketMetaData readInfo = {0, 0, 0, 0};
+		struct socketMetaData writeInfo = {0, 0, 0, 0};
+		size_t toRead = maxOutstandingBytes;
+		size_t toWrite = outstandingBytes;
+
+		if (outstandingBytes > maxOutstandingBytes) {
+			toRead = outstandingBytes;
 		}
 
-		// Read from client
-		if (receive(descriptor, buffer, args->size, busy_waiting) == -1) {
-			throw("Error receving from server");
+		readInfo = read_from_socket(readBuffer, descriptor, reqSize, toRead, false);
+		totalBytesRead += readInfo.totalBytes;
+		outstandingBytes += readInfo.totalBytes;
+
+		if (readInfo.totalBytes != 0) {
+			toWrite += readInfo.totalBytes;
 		}
 
-		benchmark(&bench);
+		writeInfo = write_to_socket(readBuffer, descriptor, reqSize, toWrite, false);
+		totalBytesWritten += writeInfo.totalBytes;
+		outstandingBytes -= writeInfo.totalBytes;
 	}
-
-	evaluate(&bench, args);
-	cleanup(descriptor, buffer);
+	
+	// before closing connection, wait for client to finish
+	server_once(WAIT);
+	evaluateServer(&bench, args->count);
+	close(descriptor);
 }
 
 void get_server_information(struct addrinfo **server_info) {
@@ -227,7 +229,7 @@ void get_server_information(struct addrinfo **server_info) {
 	// 3. The struct of hints we supply for the address.
 	// 4. The addrinfo struct the function should populate with addresses
 	//    (remember that addrinfo is a linked list)
-	return_code = getaddrinfo(HOST, PORT, &hints, server_info);
+	return_code = getaddrinfo(HOST, READ_PORT, &hints, server_info);
 
 	if (return_code != 0) {
 		fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(return_code));
@@ -297,6 +299,17 @@ int create_socket() {
 }
 
 int main(int argc, char *argv[]) {
+	cpu_set_t cpuset;  // Set of CPUs
+  	CPU_ZERO(&cpuset);  // Initialize the set to empty
+
+	// Set the CPU affinity to core 0 (first core)
+	CPU_SET(0, &cpuset);
+
+	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
+		perror("sched_setaffinity");
+		exit(1);
+	}
+	
 	// File-descriptor to the server socket
 	int socket_descriptor;
 
@@ -304,20 +317,21 @@ int main(int argc, char *argv[]) {
 	// client-communication will take place
 	int connection;
 
-	// Flag to determine whether or not to do busy waiting
-	// and not block the socket, or use normal blocking sockets.
-	int busy_waiting;
-
 	// Command line arguments
 	struct Arguments args;
 
-	busy_waiting = check_flag("busy", argc, argv);
 	parse_arguments(&args, argc, argv);
 
 	socket_descriptor = create_socket();
-	connection = accept_communication(socket_descriptor, busy_waiting);
+	
+	server_once(NOTIFY);
+	server_once(WAIT);
+	
+	connection = accept_communication(socket_descriptor);
+	
+	server_once(NOTIFY);
 
-	communicate(connection, &args, busy_waiting);
+	communicate(connection, &args);
 
 	return EXIT_SUCCESS;
 }

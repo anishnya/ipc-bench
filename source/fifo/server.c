@@ -21,48 +21,48 @@ void cleanup(int stream, void *buffer) {
 	close(stream);
 }
 
-bool checkPoll(struct pollfd* pfds, int timeToWait) {
-	int ret = poll(pfds, 2, timeToWait);
-	if (ret == -1) {
-		throw("error");
-	}
-
-	return true;
-}
-
 void communicate(int readStream, int writeStream,
 								 struct Arguments *args,
 								 struct sigaction *signal_action) {
 	
-	void *readBuffer = malloc(args->size * args->rate);
-
-	size_t reqsServed = 0;
+	size_t reqSize = args->size;
+	size_t bufferSize = reqSize * args->rate;
+	void *readBuffer = malloc(bufferSize);
 
 	struct Benchmarks bench;
 	setup_benchmarks(&bench);
 	wait_for_signal(signal_action);
-	
-	struct pollfd *pfds;
-	pfds = (struct pollfd*)malloc(2 * sizeof(struct pollfd));
 
-	// See if we can read anything
-	pfds[0].fd = readStream;
- 	pfds[0].events = POLLIN;
+	ssize_t outstandingBytes = 0;
+	ssize_t maxOutstandingBytes = reqSize * args->rate;
+	ssize_t maxBytes = reqSize * args->count;
+	ssize_t totalBytesRead = 0;
+	ssize_t totalBytesWritten = 0;
 
-	// See if we can write anything
-  	pfds[1].fd = writeStream;
-  	pfds[1].events = POLLOUT;
+	while(totalBytesWritten < maxBytes) {
+		struct pipeMetaData readInfo;
+		struct pipeMetaData writeInfo;
+		size_t toRead = maxOutstandingBytes;
+		size_t toWrite = outstandingBytes;
 
-	while(reqsServed < args->count) {
-		// Read and send as much as possible
-		if(checkPoll(pfds, 0) && (pfds[0].revents && POLLIN) && (pfds[0].revents && POLLOUT)) {
-			read_from_pipe(readBuffer, readStream, sizeof(bench_t) + args->size);
-			write_to_pipe(readBuffer, writeStream, sizeof(bench_t) + args->size);
-			reqsServed++;
+		if (outstandingBytes > maxOutstandingBytes) {
+			toRead = outstandingBytes;
 		}
+
+		readInfo = read_from_pipe(readBuffer, readStream, reqSize, toRead);
+		totalBytesRead += readInfo.totalBytes;
+		outstandingBytes += readInfo.totalBytes;
+
+		if (readInfo.totalBytes != 0) {
+			toWrite += readInfo.totalBytes;
+		}
+
+		writeInfo = write_to_pipe(readBuffer, writeStream, reqSize, toWrite);
+		totalBytesWritten += writeInfo.totalBytes;
+		outstandingBytes -= writeInfo.totalBytes;
 	}
 	
-	evaluateServer(&bench, reqsServed);
+	evaluateServer(&bench, args->count);
 	cleanup(readStream, readBuffer);
 	close(writeStream);
 }
@@ -78,26 +78,33 @@ int open_fifo(const char* path, struct Arguments *args) {
 	fd = open(path, O_RDWR);
 
 	// Use fcntl to set the pipe size on the opened file descriptor
-  	int result = fcntl(fd, F_SETFL, O_NONBLOCK, F_SETPIPE_SZ, 102400);
+  	int result = fcntl(fd, F_SETPIPE_SZ, 102400);
 	if (result == -1) {
 		perror("fcntl");
 		exit(1);
-  	}	
+  	}
+
+	// result = fcntl(fd, F_SETFL);
+	// if (result == -1) {
+	// 	perror("fcntl");
+	// 	exit(1);
+  	// }
 
 	return fd;
 }
 
 int main(int argc, char* argv[]) {
-	// cpu_set_t cpuset;  // Set of CPUs
-  	// CPU_ZERO(&cpuset);  // Initialize the set to empty
+	cpu_set_t cpuset;  // Set of CPUs
+  	CPU_ZERO(&cpuset);  // Initialize the set to empty
 
-	// // Set the CPU affinity to core 1 (second core)
-	// CPU_SET(0, &cpuset);
+	// Set the CPU affinity to core 0 (first core)
+	CPU_SET(0, &cpuset);
 
-	// if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
-	// 	perror("sched_setaffinity");
-	// 	exit(1);
-	// }
+	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
+		perror("sched_setaffinity");
+		exit(1);
+	}
+
 	// The file pointers we will associate with the FIFO
 	int clientWriteStream;
 	int clientReadStream;

@@ -43,41 +43,81 @@ void benchmark(Benchmarks* bench) {
 	bench->squared_sum += (time * time);
 }
 
-void benchmarkCon(Benchmarks* bench, bench_t startTime) {
-	const bench_t time = now() - startTime;
-	if (time < bench->minimum) {
-		bench->minimum = time;
-	}
-
-	if (time > bench->maximum) {
-		bench->maximum = time;
-	}
-
-	bench->sum += time;
-	bench->squared_sum += (time * time);
+// Function used by qsort to compare two unsigned long longs
+int compareULLongs(const void *a, const void *b) {
+  return (*(unsigned long long*)a - *(unsigned long long*)b);
 }
+
+void analyze_array(unsigned long long arr[], size_t size, size_t rate) {
+  double sum = 0.0;
+  int i;
+
+  // Find the sum of all elements, prevent overflow
+  for (i = 0; i < size; i++) {
+	double toAdd = (arr[i] / (double)size);
+    sum += toAdd;
+  }
+
+  // Calculate the mean (average)
+  double mean = sum;
+
+  // Find the minimum and maximum elements
+  unsigned long long min = arr[0];
+  unsigned long long max = arr[0];
+  for (i = 1; i < size; i++) {
+    if (arr[i] < min) {
+      min = arr[i];
+    } else if (arr[i] > max) {
+      max = arr[i];
+    }
+  }
+
+  // Sort the array to find the median
+  qsort(arr, size, sizeof(unsigned long long), compareULLongs);
+
+  // Calculate the median
+  double median;
+  if (size % 2 == 0) {
+    median = (arr[size / 2 - 1] + arr[size / 2]) / 2.0;
+  } else {
+    median = arr[size / 2];
+  }
+
+  // Calculate the standard deviation
+  double sq_diff = 0.0;
+  for (i = 0; i < size; i++) {
+    sq_diff += pow(arr[i] - mean, 2);
+  }
+  double std = sqrt(sq_diff / size);
+
+  // Print the results
+  printf("Latency = %.2f\n", mean);
+  printf("Median = %.2f\n", median);
+  printf("Standard Deviation = %.2f\n", std);
+  printf("Minimum = %llu\n", min); // Use %llu format specifier for unsigned long long
+  printf("Maximum = %llu\n", max);
+  printf("expected total time: %f\n", ((mean / rate) * size));
+}
+
 
 void evaluate(Benchmarks* bench, Arguments* args) {
 	assert(args->count > 0);
-	const double average = (((double)bench->sum) / args->count);
+	const bench_t total_time = now() - bench->total_start;
+	const double average = (((double)total_time) / args->count);
 
+	printf("Total duration:     %.3f\tms\n", total_time / 1e6);
 	printf("Latency:   %.3f\tus\n", average / 1000.0);
 }
 
 void evaluateClient(bench_t *diffs, Arguments* args) {
 	assert(args->count > 0);
-	double sum = 0;
-	for (size_t i = 0; i < args->count; ++i) {
-		sum += (double)diffs[i];
-	}
-
-	const double average = sum / args->count;
-	printf("Latency:   %.3f\tus\n", average / 1000.0);
+	analyze_array((unsigned long long*)diffs, args->count, args->rate);
 }
 
 void evaluateServer(Benchmarks *bench, size_t numReqs) {
 	const bench_t total_time = now() - bench->total_start;
 	int messageRate = (int)(numReqs / (total_time / 1e9));
+	printf("Total duration:     %.3f\tms\n", total_time / 1e6);
 	printf("Message rate:       %d\tmsg/s\n", messageRate);
 }
 

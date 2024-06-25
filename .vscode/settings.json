@@ -1,8 +1,21 @@
 {
     "files.associations": {
+        "*.md": "markdown",
         "atomic": "c",
         "rateguard.h": "c",
         "kernel-page-flags.h": "c",
-        "utility.h": "c"
+        "utility.h": "c",
+        "helper.h": "c",
+        "sockets.h": "c",
+        "unistd.h": "c",
+        "*.tcc": "c",
+        "cstdio": "c",
+        "cstdlib": "c",
+        "cwchar": "c",
+        "fstream": "c",
+        "new": "c",
+        "common.h": "c",
+        "poll.h": "c",
+        "__sigset_t.h": "c"
     }
 }

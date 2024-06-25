@@ -2,8 +2,8 @@
 ## TARGETS
 ###########################################################
 
-add_executable(tcp-client client.c)
-add_executable(tcp-server server.c)
+add_executable(tcp-client client.c helper.c)
+add_executable(tcp-server server.c helper.c)
 add_executable(tcp tcp.c)
 
 ###########################################################

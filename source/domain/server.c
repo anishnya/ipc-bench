@@ -1,52 +1,67 @@
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <sched.h>
 
 #include "common/common.h"
 #include "common/sockets.h"
+#include "domain/helper.h"
 
-#define SOCKET_PATH "/tmp/ipc_bench_socket"
-
-void cleanup(int connection, void* buffer) {
+void cleanup(int connection, char *socketPath, void* buffer) {
 	close(connection);
 	free(buffer);
-	if (remove(SOCKET_PATH) == -1) {
+	if (remove(socketPath) == -1) {
 		throw("Error removing domain socket");
 	}
 }
 
-void communicate(int connection, struct Arguments* args, int busy_waiting) {
-	struct Benchmarks bench;
-	int message;
-	void* buffer;
+void communicate(int connection, struct Arguments* args) {
+	size_t reqSize = args->size;
+	size_t bufferSize = reqSize * args->rate;
+	void *readBuffer = malloc(bufferSize);
 
-	buffer = malloc(args->size);
+	struct Benchmarks bench;
 	setup_benchmarks(&bench);
 
-	for (message = 0; message < args->count; ++message) {
-		bench.single_start = now();
+	ssize_t outstandingBytes = 0;
+	ssize_t maxOutstandingBytes = reqSize * args->rate;
+	ssize_t maxBytes = reqSize * args->count;
+	ssize_t totalBytesRead = 0;
+	ssize_t totalBytesWritten = 0;
 
-		if (send(connection, buffer, args->size, 0) < args->size) {
-			throw("Error sending on server-side");
+	while(totalBytesWritten < maxBytes) {
+		struct socketMetaData readInfo = {0, 0, 0, 0};
+		struct socketMetaData writeInfo = {0, 0, 0, 0};
+		size_t toRead = maxOutstandingBytes;
+		size_t toWrite = outstandingBytes;
+
+		if (outstandingBytes > maxOutstandingBytes) {
+			toRead = outstandingBytes;
 		}
 
-		memset(buffer, '*', args->size);
+		readInfo = read_from_socket(readBuffer, connection, reqSize, toRead, false);
+		totalBytesRead += readInfo.totalBytes;
+		outstandingBytes += readInfo.totalBytes;
 
-		if (receive(connection, buffer, args->size, busy_waiting) == -1) {
-			throw("Error receiving on server-side");
+		if (readInfo.totalBytes != 0) {
+			toWrite += readInfo.totalBytes;
 		}
 
-		benchmark(&bench);
+		writeInfo = write_to_socket(readBuffer, connection, reqSize, toWrite, false);
+		totalBytesWritten += writeInfo.totalBytes;
+		outstandingBytes -= writeInfo.totalBytes;
 	}
-
-	evaluate(&bench, args);
-	cleanup(connection, buffer);
+	
+	// before closing connection, wait for client to finish
+	server_once(WAIT);
+	evaluateServer(&bench, args->count);
 }
 
-void setup_socket(int socket_descriptor) {
+void setup_socket(int socket_descriptor, char* socketPath) {
 	int return_code;
 
 	// The main datastructure for a UNIX-domain socket.
@@ -64,7 +79,7 @@ void setup_socket(int socket_descriptor) {
 	// Set the family of the address struct
 	address.sun_family = AF_UNIX;
 	// Copy in the path
-	strcpy(address.sun_path, SOCKET_PATH);
+	strcpy(address.sun_path, socketPath);
 	// Remove the socket if it already exists
 	remove(address.sun_path);
 
@@ -93,7 +108,7 @@ void setup_socket(int socket_descriptor) {
 	}
 }
 
-int create_socket() {
+int create_socket(char* socketPath) {
 	// File descriptor for the socket
 	int socket_descriptor;
 
@@ -110,15 +125,15 @@ int create_socket() {
 		throw("Error opening socket on server-side");
 	}
 
-	setup_socket(socket_descriptor);
-
+	setup_socket(socket_descriptor, socketPath);
+	
 	// Notify the client that it can connect to the socket now
 	server_once(NOTIFY);
 
 	return socket_descriptor;
 }
 
-int accept_connection(int socket_descriptor, int busy_waiting) {
+int accept_connection(int socket_descriptor) {
 	struct sockaddr_un client;
 	int connection;
 	socklen_t length = sizeof client;
@@ -132,6 +147,7 @@ int accept_connection(int socket_descriptor, int busy_waiting) {
 		(struct sockaddr*)&client,
 		&length
 	);
+
 	// clang-format on
 
 	if (connection == -1) {
@@ -140,39 +156,37 @@ int accept_connection(int socket_descriptor, int busy_waiting) {
 
 	set_socket_both_buffer_sizes(connection);
 
-	if (busy_waiting) {
-		// adjust_socket_blocking_timeout(connection, 0, 1);
-		if (set_io_flag(connection, O_NONBLOCK) == -1) {
-			throw("Error setting socket to non-blocking on server-side");
-		}
-	}
-
-	// Don't need this one anymore (because we only have one connection)
-	close(socket_descriptor);
-
 	return connection;
 }
 
 int main(int argc, char* argv[]) {
-	// File descriptor for the server socket
-	int socket_descriptor;
+	cpu_set_t cpuset;  // Set of CPUs
+  	CPU_ZERO(&cpuset);  // Initialize the set to empty
+
+	// Set the CPU affinity to core 0 (first core)
+	CPU_SET(0, &cpuset);
+
+	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
+		perror("sched_setaffinity");
+		exit(1);
+	}
+	// File descriptor for the server sockets
+	int socketDescriptor;
+
 	// File descriptor for the socket over which
 	// the communciation will happen with the client
 	int connection;
 
-	// Flag to determine if we want busy-waiting
-	int busy_waiting;
-
 	// For command-line arguments
 	struct Arguments args;
 
-	busy_waiting = check_flag("busy", argc, argv);
 	parse_arguments(&args, argc, argv);
 
-	socket_descriptor = create_socket();
-	connection = accept_connection(socket_descriptor, busy_waiting);
-
-	communicate(connection, &args, busy_waiting);
+	// must be in order
+	socketDescriptor = create_socket(READ_SOCKET_PATH);
+	connection = accept_connection(socketDescriptor);
+	
+	communicate(connection, &args);
 
 	return EXIT_SUCCESS;
 }

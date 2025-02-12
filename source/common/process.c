@@ -104,12 +104,17 @@ void start_children(char *prefix, int argc, char *argv[]) {
 		"client"
 	);
 	// clang-format on
+	int serverStatus = 0;
+	int clientStatus = 0;
 
 	pid_t c1_id = start_child(server_name, argc, argv);
 	pid_t c2_id = start_child(client_name, argc, argv);
 
-	waitpid(c1_id, NULL, WUNTRACED);
-	waitpid(c2_id, NULL, WUNTRACED);
+	waitpid(c1_id, &serverStatus, WUNTRACED);
+	waitpid(c2_id, &clientStatus, WUNTRACED);
+
+	printf("client: %d \n", clientStatus);
+	printf("server: %d \n", serverStatus);
 
 	free(build_path);
 }

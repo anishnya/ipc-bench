@@ -1,14 +1,14 @@
 #!/bin/bash
 executable="/home/anishnya/ipc-bench/build/source/tcp/tcp"
 
-sizes=(1 128 1024 4096 8192 32768)
-rates=(1 3 5 7 10 20 30 40)
+sizes=(32768 65536 262144 1048576)
+rates=(1 3 5 10)
 
 # Loop through each parameter
 for size in "${sizes[@]}"; do
     for rate in "${rates[@]}"; do
         for i in {1..10}; do
-            count=$((5000000))
+            count=$((500000))
             # Generate a unique filename based on timestamp and parameter
             filename=$(printf "%s_%s_%s.txt" "$size" "$rate" "$i")
 

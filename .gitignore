@@ -99,3 +99,6 @@ output/
 *.result
 .tags*
 benchmarkOutput/
+benchmarkData/
+graphs/
+

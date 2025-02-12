@@ -5,8 +5,17 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "domain/helper.h"
+#include "tcp/helper.h"
 #include "common/common.h"
+
+int open_fifo(const char* path, int flag) {
+	int fd = open(path, flag);
+	if (fd == -1) {
+		printf("errno %d\n", errno);
+		return -1;
+	}
+	return fd;
+}
 
 struct socketMetaData read_from_socket(void *buffer, int sockfd, size_t chunk, size_t numBytesToRead, bool nonBlock) {
 	ssize_t total_bytes_read = 0;
@@ -24,6 +33,7 @@ struct socketMetaData read_from_socket(void *buffer, int sockfd, size_t chunk, s
 
 	while (total_bytes_read < numBytesToRead) {
 		size_t canRead = chunk;
+		bytes_read = 0;
 
 		if ((numBytesToRead - total_bytes_read) < chunk) {
 			canRead = (numBytesToRead - total_bytes_read);
@@ -34,20 +44,11 @@ struct socketMetaData read_from_socket(void *buffer, int sockfd, size_t chunk, s
 		}
 
 		else {
-			bytes_read = recv(sockfd, buffer + total_bytes_read, canRead, 0);
+			bytes_read = recv(sockfd, buffer + total_bytes_read, canRead, MSG_WAITALL);
 		}
 
 
-		if (bytes_read == 0) {
-			break;
-		}
-
-		if (bytes_read < 0 && errno == EAGAIN) {
-			break;
-		}
-
-		if (bytes_read < 0)
-		{
+		if (bytes_read <= 0) {
 			break;
 		}
 
@@ -77,6 +78,7 @@ struct socketMetaData write_to_socket(void *buffer, int sockfd, size_t chunk, si
 
 	while (total_bytes_written < numBytesToWrite) {
 		size_t canWrite = chunk;
+		bytes_written = 0;
 
 		if ((numBytesToWrite - total_bytes_written) < chunk) {
 			canWrite = (numBytesToWrite - total_bytes_written);
@@ -87,18 +89,10 @@ struct socketMetaData write_to_socket(void *buffer, int sockfd, size_t chunk, si
 		}
 
 		else {
-			bytes_written = send(sockfd, buffer + total_bytes_written, canWrite, 0);
+			bytes_written = send(sockfd, buffer + total_bytes_written, canWrite, MSG_WAITALL);
 		}
 		
-		if (bytes_written == 0) {
-			break;
-		}		
-
-		if (bytes_written < 0 && errno == EAGAIN) {
-			break;
-      	}
-
-		if (bytes_written < 0) {
+		if (bytes_written <= 0) {
 			break;
 		}
 

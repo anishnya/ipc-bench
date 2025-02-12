@@ -1,4 +1,3 @@
-#!/bin/bash
 import subprocess
 import re
 import json
@@ -9,20 +8,33 @@ FIFO = "fifo"
 SOCKET = "socket"
 TCP = "tcp"
 SHAREDMEM = "realm"
+REALMPRIME = "realmPrime"
+PAPER = "paper"
 
 BASE_PATH = "/home/anishnya/ipc-bench/benchmarkOutput"
 BENCHMARK_DATA_PATH = "/home/anishnya/ipc-bench/benchmarkData"
 GRAPH_PATH = "/home/anishnya/ipc-bench/graphs"
 
 IPCS = [
+    FIFO,
+    SOCKET,
     SHAREDMEM,
+    REALMPRIME,
 ]
+
+GRAPH_MAP = {
+    FIFO: "Pipe",
+    SOCKET: "Socket",
+    SHAREDMEM: "Baseline",
+    REALMPRIME: "Baseline w/o Copies",
+}
 
 PATH_MAP = {
     FIFO: f"{BASE_PATH}/fifo",
     SOCKET: f"{BASE_PATH}/socket",
     TCP: f"{BASE_PATH}/tcp",
-    SHAREDMEM: f"{BASE_PATH}/tcp",
+    SHAREDMEM: f"{BASE_PATH}/realm",
+    REALMPRIME: f"{BASE_PATH}/realmPrime"
 }
 
 DATA_PATH_MAP = {
@@ -30,6 +42,7 @@ DATA_PATH_MAP = {
     SOCKET: f"{BENCHMARK_DATA_PATH}/socket",
     TCP: f"{BENCHMARK_DATA_PATH}/tcp",
     SHAREDMEM: f"{BENCHMARK_DATA_PATH}/realm",
+    REALMPRIME: f"{BENCHMARK_DATA_PATH}/realmPrime",
 }
 
 GRAPH_PATH = {
@@ -37,6 +50,8 @@ GRAPH_PATH = {
     SOCKET: "socket",
     TCP: "tcp",
     SHAREDMEM: "realm",
+    REALMPRIME: "realmPrime",
+    PAPER: "paper", 
 }
 
 LABEL_MAP = {
@@ -52,7 +67,11 @@ LABEL_MAP = {
     2048: "2 kB",
     4096: "4 kB",
     6144: "6 kB",
-    8192: "8 kB",
+    8192: "8 KB",
+    32768: "32 KB",
+    65536: "64 KB",
+    262144: "256 KB",
+    1048576: "1 MB", 
 }
 
 def isBlockingFile(filename):
@@ -107,18 +126,17 @@ def getInfo(ipc):
     filenames = os.listdir(directory)
     blocking, nonblocking = split_list(filenames, isBlockingFile)
     maps = []
-    
+
     for dataSet in [blocking, nonblocking]:
         statMap = {}
 
         for filename in dataSet:
             fullPath = os.path.join(directory, filename)
-        
             if os.path.isfile(fullPath):
                 getStats(filename, fullPath, statMap)
     
         maps.append(statMap)
-        
+
     return maps
 
 def generateGraphs():
@@ -128,12 +146,24 @@ def generateGraphs():
         
         for resultMap in resultMaps:
             addendum = "_blocking" if blocking else ""
-            desired_keys = ["1 B", "128 B", "1 kB"]
+            desired_keys = ["64 KB", "256 KB"]
             resultMap = {key: value for key, value in resultMap.items() if key in desired_keys}
             filename = "{0}_{1}".format(ipc, addendum)
             graphMultipleLines("Throughput (RPC/sec)", "Latency (us)", f"{GRAPH_PATH[ipc]}/{filename}", resultMap)
 
             blocking = False
-            
+
+def paperGraphs():
+    desired_keys = ["128 B"]
+    
+    for key in desired_keys:
+        graphMap = {}
+        
+        for ipc in IPCS:
+            val = getInfo(ipc)[1][key]
+            graphMap.update({GRAPH_MAP[ipc]: val})
+            filename = "{0}_all_ipcs".format(key)
+            graphMultipleLines("Throughput (RPC/s)", "Latency (us)", f"{GRAPH_PATH[PAPER]}/{filename}", graphMap)
+
 if __name__ == "__main__":
-   generateGraphs()
+   paperGraphs()

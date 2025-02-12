@@ -12,6 +12,20 @@
 #include "common/common.h"
 #include "common/sockets.h"
 
+volatile int quit = 0;
+
+static void quit_signal_handler(int signal_number) {
+    quit = 1;
+}
+
+void cleanup(int connection) {
+	if (close(connection) == -1) {
+		return;
+	}
+
+	return;
+}
+
 int get_address(struct addrinfo *server_info) {
 	struct addrinfo *iterator;
 	int socket_descriptor;
@@ -56,7 +70,7 @@ int get_address(struct addrinfo *server_info) {
 		// Could not connect to the server
 		if (return_code == -1) {
 			close(socket_descriptor);
-			continue;
+			return -1;
 		}
 
 		break;
@@ -64,21 +78,18 @@ int get_address(struct addrinfo *server_info) {
 
 	// If we didn't actually find a valid address
 	if (iterator == NULL) {
-		throw("Error finding valid address!");
+		close(socket_descriptor);
+		return -1;
 	}
 
 	// Return the valid address info
 	return socket_descriptor;
 }
 
-void cleanup(int descriptor) {
-	close(descriptor);
-}
-
 bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {
 	int ret = poll(pfds, numPolled, timeToWait);
 	if (ret == -1) {
-		throw("error");
+		return false;
 	}
 
 	return true;
@@ -112,7 +123,7 @@ void updateReadWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_
 	}
 	
 	for (size_t i = startIndex; i < end; ++i) {
-		times[i] = ((time - times[i]) / 1000);
+		times[i] = ((time - times[i]));
 	}
 
 	return;	
@@ -148,8 +159,15 @@ void communicate(int descriptor, struct Arguments* args) {
 	size_t numReqsSent = 0;
 	size_t outstandingReqs = 0;
 
-	while(totalBytesRead < maxBytes) {
-		checkPoll(pfds, 1, wait);
+	while((totalBytesRead < maxBytes) && (quit == 0)) {
+		if (!checkPoll(pfds, 1, wait)) {
+			break;
+		}
+
+		if (quit != 0) {
+			break;
+		}
+
 		int canRead = (pfds[0].revents & POLLIN);
 		int canWrite = (pfds[0].revents & POLLOUT);
 		struct socketMetaData readInfo = {0, 0, 0, 0};
@@ -157,19 +175,14 @@ void communicate(int descriptor, struct Arguments* args) {
 		size_t toUpdateRead = 0;
 
 		// Can Read
-		if (canRead) {
-			readInfo = read_from_socket(readBuffer, descriptor, reqSize, outstandingBytes, false);
+		if (canRead && (quit == 0)) {
+			readInfo = read_from_socket(readBuffer, descriptor, reqSize, outstandingBytes, true);
 			outstandingBytes -= readInfo.totalBytes;
 			totalBytesRead += readInfo.totalBytes;
 			
 			if (readInfo.wholeReqs > 0) {
 				outstandingReqs -= readInfo.wholeReqs;
 				toUpdateRead += readInfo.wholeReqs;
-			}
-
-			if (readInfo.spareBytes > 0 && ((totalBytesRead % reqSize) == 0)) {
-				outstandingReqs -= 1;
-				toUpdateRead += 1;
 			}
 
 			updateReadWriteTimes(now(), times, args->count, numReqsRead, toUpdateRead);
@@ -182,25 +195,20 @@ void communicate(int descriptor, struct Arguments* args) {
 		}
 
 		// Can write
-		if (canWrite && outstandingBytes < maxOutstandingBytes) {
-			writeInfo = write_to_socket(writeBuffer, descriptor, reqSize, (maxOutstandingBytes - outstandingBytes), false);
+		if (canWrite && (outstandingBytes < maxOutstandingBytes) && (quit == 0)) {
+			writeInfo = write_to_socket(writeBuffer, descriptor, reqSize, (maxOutstandingBytes - outstandingBytes), true);
 			outstandingBytes += writeInfo.totalBytes;
 			totalBytesWritten += writeInfo.totalBytes;
-			wait = -1;
+			wait = 1000;
 
 			if (writeInfo.wholeReqs > 0) {
 				outstandingReqs += writeInfo.wholeReqs;
 			}
-
-			if (writeInfo.spareBytes > 0 && ((totalBytesWritten % reqSize) == 0)) {
-				outstandingReqs += 1;
-			}
 		}
 	}
 
-	// tell server we are done reading data
-	client_once(NOTIFY);
 	const bench_t elaspedTime = now() - bench.total_start;
+	args->count = numReqsRead > args->count ? args->count : numReqsRead;
 	printf("Total duration:     %lld\n", elaspedTime / 1000);
 	evaluateClient(times, args);
 	cleanup(descriptor);
@@ -245,9 +253,9 @@ void setup_socket(int socket_descriptor) {
 	set_socket_both_buffer_sizes(socket_descriptor);
 
 	// adjust_socket_blocking_timeout(socket_descriptor, 0, 10);
-	// if (set_io_flag(socket_descriptor, O_NONBLOCK) == -1) {
-	// 	throw("Error setting socket to non-blocking on client-side");
-	// }
+	if (set_io_flag(socket_descriptor, O_NONBLOCK) == -1) {
+		throw("Error setting socket to non-blocking on client-side");
+	}
 }
 
 int create_socket() {
@@ -284,6 +292,10 @@ int create_socket() {
 	get_server_information(&server_info);
 	socket_descriptor = get_address(server_info);
 
+	if (socket_descriptor == 1) {
+		return -1;
+	}
+
 	setup_socket(socket_descriptor);
 
 	// Don't need this anymore
@@ -296,6 +308,7 @@ int main(int argc, char *argv[]) {
 	cpu_set_t cpuset;  // Set of CPUs
   	CPU_ZERO(&cpuset);  // Initialize the set to empty
 	CPU_SET(1, &cpuset);
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
 		perror("sched_setaffinity");
@@ -304,19 +317,37 @@ int main(int argc, char *argv[]) {
 	
 	// Sockets are returned by the OS as standard file descriptors.
 	// It will be used for all communication with the server.
-	int socketDescriptor;
+	int socketDescriptor = -1;
+
+	int tcpFifo = -1;
+	void *buffer = malloc(1);
 
 	// Command-line arguments
 	struct Arguments args;
-
 	parse_arguments(&args, argc, argv);
 
-	client_once(WAIT);
+	struct sigaction signal_action;
+	setup_client_signals(&signal_action);
 	
-	socketDescriptor = create_socket();
+	tcpFifo = open_fifo(TCP_FIFO_PATH, O_RDWR);
+	if (read(tcpFifo, buffer, 1) <= 0) {
+		throw("bad read");
+	}
+
+	while(socketDescriptor == -1) {
+		socketDescriptor = create_socket();
+	}
 	
-	client_once(NOTIFY);
-	client_once(WAIT);
+	struct sigaction quit_signal_action;
+    quit_signal_action.sa_handler = quit_signal_handler;
+    
+	if (sigaction(SIGINT, &quit_signal_action, NULL) != 0) {
+        return EXIT_FAILURE;
+    }
+
+	signal(SIGPIPE, quit_signal_handler);
+	signal(SIGCHLD, SIG_IGN);
+	signal(SIGTTIN, SIG_IGN);
 	
 	communicate(socketDescriptor, &args);
 

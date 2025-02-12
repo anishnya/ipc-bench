@@ -21,6 +21,7 @@
 
 #define READ_SOCKET_PATH "/tmp/ipc_bench_socket_READ"
 #define WRITE_SOCKET_PATH "/tmp/ipc_bench_socket_WRITE"
+#define SOCKET_FIFO_PATH "/tmp/socket_fifo"
 
 struct socketMetaData {
     size_t wholeReqs;
@@ -31,5 +32,6 @@ struct socketMetaData {
 
 struct socketMetaData read_from_socket(void *buffer, int stream, size_t chunk, size_t numBytesToRead, bool nonBlock);
 struct socketMetaData write_to_socket(void *buffer, int stream, size_t chunk, size_t numBytesToWrite, bool nonBlock);
+int open_fifo(const char* path, int flag);
 
 #endif

@@ -36,7 +36,7 @@ void benchmark(Benchmarks *bench);
 
 void evaluate(Benchmarks *bench, struct Arguments *args);
 
-void evaluateServer(Benchmarks *bench, size_t numReqs);
+void evaluateServer(Benchmarks *bench, size_t numReqs, bench_t endTime);
 
 void benchmarkCon(Benchmarks* bench, bench_t startTime);
 

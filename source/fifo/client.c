@@ -14,19 +14,24 @@
 #include <fcntl.h>
 #include <sched.h>
 
-#define READ_FIFO_PATH "/tmp/ipc_bench_fifo_read"
-#define WRITE_FIFO_PATH "/tmp/ipc_bench_fifo_write"
+volatile int quit = 0;
 
-
-void cleanup(int stream, void *buffer) {
-	free(buffer);
-	close(stream);
+static void quit_signal_handler(int signal_number) {
+    quit = 1;
 }
 
-bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {	
+void cleanup(int stream) {
+	if (close(stream) == -1) {
+		return;
+	}
+
+	return;
+}
+
+bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {
 	int ret = poll(pfds, numPolled, timeToWait);
 	if (ret == -1) {
-		throw("error");
+		return false;
 	}
 
 	return true;
@@ -34,6 +39,7 @@ bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {
 
 void updateWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_t startIndex, size_t numToUpdate) {
 	size_t end = startIndex + numToUpdate; 
+
 	if (startIndex > totalTimes) {
 		return;
 	}
@@ -51,6 +57,7 @@ void updateWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_t st
 
 void updateReadWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_t startIndex, size_t numToUpdate) {
 	size_t end = startIndex + numToUpdate; 
+
 	if (startIndex > totalTimes) {
 		return;
 	}
@@ -61,7 +68,7 @@ void updateReadWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_
 	
 	for (size_t i = startIndex; i < end; ++i) {
 		// Prevent overflow
-		times[i] = ((time - times[i]) / 1000);
+		times[i] = ((time - times[i]));
 	}
 
 	return;	
@@ -90,8 +97,6 @@ void communicate(int readStream, int writeStream,
 
 	struct Benchmarks bench;
 	setup_benchmarks(&bench);
-
-	notify_server(signal_action);
 	
 	int wait = 0;
 	size_t outstandingBytes = 0;
@@ -107,8 +112,16 @@ void communicate(int readStream, int writeStream,
 
 	bench.total_start = now();
 
-	while(totalBytesRead < maxBytes) {
-		checkPoll(pfds, 2, wait);
+	while((totalBytesRead < maxBytes) && (quit == 0)) {
+		if (!checkPoll(pfds, 2, wait)) {
+			break;
+		}
+
+		// Kill after poll
+		if (quit != 0) {
+			break;
+		}
+
 		int canRead = pfds[0].revents & POLLIN;
 		int canWrite = pfds[1].revents & POLLOUT; 
 		struct pipeMetaData readInfo = {0, 0, 0};
@@ -116,7 +129,7 @@ void communicate(int readStream, int writeStream,
 		size_t toUpdateRead = 0;
 
 		// If you can read
-		if (canRead) {
+		if (canRead && (quit == 0)) {
 			readInfo = read_from_pipe(readBuffer, readStream, reqSize, outstandingBytes);
 			outstandingBytes -= readInfo.totalBytes;
 			totalBytesRead += readInfo.totalBytes;
@@ -124,11 +137,6 @@ void communicate(int readStream, int writeStream,
 			if (readInfo.wholeReqs > 0) {
 				outstandingReqs -= readInfo.wholeReqs;
 				toUpdateRead += readInfo.wholeReqs;
-			}
-
-			if (readInfo.spareBytes > 0 && ((totalBytesRead % reqSize) == 0)) {
-				outstandingReqs -= 1;
-				toUpdateRead += 1;
 			}
 
 			updateReadWriteTimes(now(), times, args->count, numReqsRead, toUpdateRead);
@@ -141,47 +149,36 @@ void communicate(int readStream, int writeStream,
 		}
 
 		// Can write
-		if (canWrite && outstandingBytes < maxOutstandingBytes) {
+		if (canWrite && (outstandingBytes < maxOutstandingBytes) && (quit == 0)) {
 			writeInfo = write_to_pipe(writeBuffer, writeStream, reqSize, (maxOutstandingBytes - outstandingBytes));
 			outstandingBytes += writeInfo.totalBytes;
 			totalBytesWritten += writeInfo.totalBytes;
-			wait = -1;
+			wait = 1000;
 
 			if (writeInfo.wholeReqs > 0) {
 				outstandingReqs += writeInfo.wholeReqs;
 			}
-
-			if (writeInfo.spareBytes > 0 && ((totalBytesWritten % reqSize) == 0)) {
-				outstandingReqs += 1;
-			}
 		}
 	}
-	
-	const bench_t elaspedTime = now() - bench.total_start;
-	printf("Total duration:     %lld\n", elaspedTime / 1000);
+	// Needed upon a kill
+	args->count = (numReqsRead > args->count) ? args->count : numReqsRead;
 	evaluateClient(times, args);
-	cleanup(writeStream, writeBuffer);
-	cleanup(readStream, readBuffer);
+	cleanup(readStream);
+	cleanup(writeStream);
 }
 
-int open_fifo(const char* path) {
-	int fd = open(path, O_RDWR); 
+int open_fifo(const char* path, int flag, struct sigaction *signal_action) {
+	int fd = open(path, flag); 
 	if (fd == -1) {
-		throw("Error opening stream to FIFO on client-side");
+		printf("errno %d\n", errno);
+		return -1;
 	}
 
-	// Use fcntl to set the pipe size on the opened file descriptor
-  	int result = fcntl(fd, F_SETPIPE_SZ, 102400);
+	int result = fcntl(fd, F_SETPIPE_SZ, 102400);
 	if (result == -1) {
-		perror("fcntl");
-		exit(1);
+		printf("errno %d\n", errno);
+		return -1;
   	}
-
-	// result = fcntl(fd, F_SETFL, 0);
-	// if (result == -1) {
-	// 	perror("fcntl");
-	// 	exit(1);
-  	// }
 
 	return fd;
 }
@@ -189,28 +186,48 @@ int open_fifo(const char* path) {
 int main(int argc, char *argv[]) {
 	cpu_set_t cpuset;  // Set of CPUs
   	CPU_ZERO(&cpuset);  // Initialize the set to empty
-	CPU_SET(1, &cpuset);
+	
+	CPU_SET(3, &cpuset);
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
-		perror("sched_setaffinity");
-		exit(1);
+		return EXIT_FAILURE;
 	}
 
 	// The file pointers we will associate with the FIFO
 	int clientWriteStream;
 	int clientReadStream;
 
-	// For server/client signals
 	struct sigaction signal_action;
+	setup_client_signals(&signal_action);
 
 	struct Arguments args;
-	parse_arguments(&args, argc, argv);
+	parse_arguments(&args, argc, argv);	
 
-	setup_client_signals(&signal_action);
-	// Wait for server to set up stuff
-	wait_for_signal(&signal_action);
-	clientReadStream = open_fifo(READ_FIFO_PATH);
-	clientWriteStream = open_fifo(WRITE_FIFO_PATH);
+	clientReadStream = open_fifo(RESPONSE, O_RDONLY, &signal_action);
+	if (clientReadStream == -1) {
+		fflush(stdout);
+		printf("%d\n", clientReadStream);
+		return EXIT_FAILURE;
+	}
+
+	clientWriteStream = open_fifo(REQUEST, O_WRONLY, &signal_action);
+	if (clientWriteStream == -1) {
+		fflush(stdout);
+		return EXIT_FAILURE;
+	}
+
+	struct sigaction quit_signal_action;
+    quit_signal_action.sa_handler = quit_signal_handler;
+    
+	if (sigaction(SIGINT, &quit_signal_action, NULL) != 0) {
+        return EXIT_FAILURE;
+    }
+
+	signal(SIGPIPE, quit_signal_handler);
+	signal(SIGCHLD, SIG_IGN);
+  	signal(SIGTTIN, SIG_IGN);
+
 	communicate(clientReadStream, clientWriteStream, &args, &signal_action);
 
 	return EXIT_SUCCESS;

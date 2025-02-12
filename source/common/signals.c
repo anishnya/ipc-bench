@@ -1,6 +1,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "common/signals.h"
 #include "common/utility.h"
@@ -70,16 +71,14 @@ void setup_parent_signals() {
 
 void setup_server_signals(struct sigaction *signal_action) {
 	setup_signals(signal_action, BLOCK_USR1 | IGNORE_USR2);
-	usleep(1000);
 }
 
 void setup_client_signals(struct sigaction *signal_action) {
 	setup_signals(signal_action, IGNORE_USR1 | BLOCK_USR2);
-	usleep(1000);
 }
 
 void notify_server() {
-	kill(0, SIGUSR1);
+ 	kill(0, SIGUSR1);
 }
 
 void notify_client() {

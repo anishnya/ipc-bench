@@ -33,4 +33,9 @@ struct pipeMetaData read_from_pipe(void *buffer, int stream, size_t chunk, size_
 struct pipeMetaData write_to_pipe(void *buffer, int stream, size_t chunk, size_t numBytesToWrite);
 int maxPipeSize(struct Arguments *args);
 
+
+#define REQUEST "/tmp/ipc_bench_fifo_req"
+#define RESPONSE "/tmp/ipc_bench_fifo_res"
+#define SYNC "/tmp/ipc_bench_fifo_sync"
+
 #endif

@@ -1,8 +1,8 @@
 #!/bin/bash
-executable="/home/anishnya/ipc-bench/build/source/tcp/tcp"
+executable="/home/anishnya/ipc-bench/build/source/domain/domain"
 
-sizes=(1 128 1024 4096 8192 32768)
-rates=(1 3 5 7 10 20 30 40)
+sizes=(1 128)
+rates=(1 3 5 10 30 50 70 90)
 
 # Loop through each parameter
 for size in "${sizes[@]}"; do
@@ -40,13 +40,13 @@ for size in "${sizes[@]}"; do
                     break
                   fi
                   
-                  sleep q
+                  sleep 2
                   ((counter++))
                 done
             done
             
             echo "Done: " $filename
-            cp $filename ~/ipc-bench/benchmarkOutput/tcp/new
+            cp $filename ~/ipc-bench/benchmarkOutput/socket/new
             rm -rf $filename
             rm -rf temp.txt
         done

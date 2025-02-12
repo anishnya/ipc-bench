@@ -16,6 +16,9 @@
         "new": "c",
         "common.h": "c",
         "poll.h": "c",
-        "__sigset_t.h": "c"
+        "__sigset_t.h": "c",
+        "un.h": "c",
+        "fcntl.h": "c",
+        "stdlib.h": "c"
     }
 }

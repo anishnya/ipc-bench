@@ -11,12 +11,27 @@
 #include "common/sockets.h"
 #include "domain/helper.h"
 
-void cleanup(int connection, char *socketPath, void* buffer) {
-	close(connection);
-	free(buffer);
-	if (remove(socketPath) == -1) {
-		throw("Error removing domain socket");
+volatile int quit = 0;
+
+static void quit_signal_handler(int signal_number) {
+    quit = 1;
+}
+
+void cleanup(int connection) {
+	if (close(connection) == -1) {
+		return;
 	}
+
+	return;
+}
+
+bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {
+	int ret = poll(pfds, numPolled, timeToWait);
+	if (ret == -1) {
+		return false;
+	}
+
+	return true;
 }
 
 void communicate(int connection, struct Arguments* args) {
@@ -25,7 +40,15 @@ void communicate(int connection, struct Arguments* args) {
 	void *readBuffer = malloc(bufferSize);
 
 	struct Benchmarks bench;
-	setup_benchmarks(&bench);
+	bool firstRead = true;
+	bench_t endTime = 0;
+
+	struct pollfd *pfds;
+	pfds = (struct pollfd*)malloc(1 * sizeof(struct pollfd));
+
+	// See if we can read anything
+	pfds[0].fd = connection;
+	pfds[0].events = POLLIN;
 
 	ssize_t outstandingBytes = 0;
 	ssize_t maxOutstandingBytes = reqSize * args->rate;
@@ -33,7 +56,20 @@ void communicate(int connection, struct Arguments* args) {
 	ssize_t totalBytesRead = 0;
 	ssize_t totalBytesWritten = 0;
 
-	while(totalBytesWritten < maxBytes) {
+	while(totalBytesWritten < maxBytes && quit == 0) {
+		// Need to log time before a poll
+		endTime = now();
+		
+		if (!checkPoll(pfds, 1, 1000)) {
+			break;
+		}
+
+		if (quit != 0) {
+			break;
+		}
+		
+		int canRead = (pfds[0].revents & POLLIN);
+		int canWrite = (pfds[0].revents & POLLOUT);
 		struct socketMetaData readInfo = {0, 0, 0, 0};
 		struct socketMetaData writeInfo = {0, 0, 0, 0};
 		size_t toRead = maxOutstandingBytes;
@@ -43,22 +79,32 @@ void communicate(int connection, struct Arguments* args) {
 			toRead = outstandingBytes;
 		}
 
-		readInfo = read_from_socket(readBuffer, connection, reqSize, toRead, false);
-		totalBytesRead += readInfo.totalBytes;
-		outstandingBytes += readInfo.totalBytes;
+		if (canRead && (quit == 0)) {
+			readInfo = read_from_socket(readBuffer, connection, reqSize, toRead, false);
+			totalBytesRead += readInfo.totalBytes;
+			outstandingBytes += readInfo.totalBytes;
+			if (readInfo.totalBytes != 0) {
+				toWrite += readInfo.totalBytes;
+				// When we can read, only then do we care that we can write
 
-		if (readInfo.totalBytes != 0) {
-			toWrite += readInfo.totalBytes;
+				if (firstRead) {
+					setup_benchmarks(&bench);
+					pfds[0].events = POLLIN | POLLOUT;
+					firstRead = false;
+				}
+			}
 		}
 
-		writeInfo = write_to_socket(readBuffer, connection, reqSize, toWrite, false);
-		totalBytesWritten += writeInfo.totalBytes;
-		outstandingBytes -= writeInfo.totalBytes;
+		if (canWrite && (quit == 0)) {
+			writeInfo = write_to_socket(readBuffer, connection, reqSize, toWrite, false);
+			totalBytesWritten += writeInfo.totalBytes;
+			outstandingBytes -= writeInfo.totalBytes;
+		}
 	}
 	
-	// before closing connection, wait for client to finish
-	server_once(WAIT);
-	evaluateServer(&bench, args->count);
+	ssize_t numReqs = totalBytesWritten / reqSize;
+	evaluateServer(&bench, numReqs, endTime);
+	cleanup(connection);
 }
 
 void setup_socket(int socket_descriptor, char* socketPath) {
@@ -126,10 +172,6 @@ int create_socket(char* socketPath) {
 	}
 
 	setup_socket(socket_descriptor, socketPath);
-	
-	// Notify the client that it can connect to the socket now
-	server_once(NOTIFY);
-
 	return socket_descriptor;
 }
 
@@ -148,13 +190,12 @@ int accept_connection(int socket_descriptor) {
 		&length
 	);
 
-	// clang-format on
-
 	if (connection == -1) {
-		throw("Error accepting connection");
+		return -1;
 	}
 
 	set_socket_both_buffer_sizes(connection);
+	close(socket_descriptor);
 
 	return connection;
 }
@@ -164,28 +205,55 @@ int main(int argc, char* argv[]) {
   	CPU_ZERO(&cpuset);  // Initialize the set to empty
 
 	// Set the CPU affinity to core 0 (first core)
-	CPU_SET(0, &cpuset);
+	CPU_SET(5, &cpuset);
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
 		perror("sched_setaffinity");
 		exit(1);
 	}
-	// File descriptor for the server sockets
-	int socketDescriptor;
-
-	// File descriptor for the socket over which
-	// the communciation will happen with the client
-	int connection;
+	// File descriptor and connection for the server sockets
+	int socketDescriptor = -1;
+	int connection = -1;
+	
+	// Fifo signaling
+	int socketFifo = -1;
+	void *buffer = malloc(1);
 
 	// For command-line arguments
 	struct Arguments args;
-
 	parse_arguments(&args, argc, argv);
 
+	struct sigaction signal_action;
+	setup_server_signals(&signal_action);
+
+
 	// must be in order
-	socketDescriptor = create_socket(READ_SOCKET_PATH);
-	connection = accept_connection(socketDescriptor);
-	
+	while (socketDescriptor == -1) {
+		socketDescriptor = create_socket(READ_SOCKET_PATH);
+	}
+
+	// Tell client socket is ready
+	socketFifo = open_fifo(SOCKET_FIFO_PATH, O_RDWR);
+	if(write(socketFifo, buffer, 1) <= 0) {
+		throw("bad write");
+	}
+
+	while (connection == -1) {
+		connection = accept_connection(socketDescriptor);
+	}
+
+	struct sigaction quit_signal_action;
+    quit_signal_action.sa_handler = quit_signal_handler;
+    
+	if (sigaction(SIGINT, &quit_signal_action, NULL) != 0) {
+        return EXIT_FAILURE;
+    }
+
+	signal(SIGPIPE, quit_signal_handler);
+	signal(SIGCHLD, SIG_IGN);
+	signal(SIGTTIN, SIG_IGN);
+
 	communicate(connection, &args);
 
 	return EXIT_SUCCESS;

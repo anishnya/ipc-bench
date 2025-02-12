@@ -11,10 +11,18 @@
 #include "domain/helper.h"
 #include <sched.h>
 
+volatile int quit = 0;
 
-void cleanup(int connection, void* buffer) {
-	close(connection);
-	free(buffer);
+static void quit_signal_handler(int signal_number) {
+    quit = 1;
+}
+
+void cleanup(int connection) {
+	if (close(connection) == -1) {
+		return;
+	}
+
+	return;
 }
 
 void resetPollStruct(struct pollfd* pfds, int readFD, int writeFD, short readEvent, short writeEvent) {
@@ -29,7 +37,7 @@ void resetPollStruct(struct pollfd* pfds, int readFD, int writeFD, short readEve
 bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {
 	int ret = poll(pfds, numPolled, timeToWait);
 	if (ret == -1) {
-		throw("error");
+		return false;
 	}
 
 	return true;
@@ -63,7 +71,7 @@ void updateReadWriteTimes(bench_t time, bench_t *times, size_t totalTimes, size_
 	}
 	
 	for (size_t i = startIndex; i < end; ++i) {
-		times[i] = ((time - times[i]) / 1000);
+		times[i] = ((time - times[i]));
 	}
 
 	return;	
@@ -99,8 +107,15 @@ void communicate(int connection, struct Arguments* args) {
 	size_t numReqsSent = 0;
 	size_t outstandingReqs = 0;
 
-	while(totalBytesRead < maxBytes) {
-		checkPoll(pfds, 1, wait);
+	while(totalBytesRead < maxBytes && (quit == 0)) {
+		if (!checkPoll(pfds, 1, wait)) {
+			break;
+		}
+
+		if(quit != 0) {
+			break;
+		}
+
 		int canRead = (pfds[0].revents & POLLIN);
 		int canWrite = (pfds[0].revents & POLLOUT);
 		struct socketMetaData readInfo = {0, 0, 0, 0};
@@ -108,7 +123,7 @@ void communicate(int connection, struct Arguments* args) {
 		size_t toUpdateRead = 0;
 
 		// Can Read
-		if (canRead) {
+		if (canRead && (quit == 0)) {
 			readInfo = read_from_socket(readBuffer, connection, reqSize, outstandingBytes, false);
 			outstandingBytes -= readInfo.totalBytes;
 			totalBytesRead += readInfo.totalBytes;
@@ -116,11 +131,6 @@ void communicate(int connection, struct Arguments* args) {
 			if (readInfo.wholeReqs > 0) {
 				outstandingReqs -= readInfo.wholeReqs;
 				toUpdateRead += readInfo.wholeReqs;
-			}
-
-			if (readInfo.spareBytes > 0 && ((totalBytesRead % reqSize) == 0)) {
-				outstandingReqs -= 1;
-				toUpdateRead += 1;
 			}
 
 			updateReadWriteTimes(now(), times, args->count, numReqsRead, toUpdateRead);
@@ -133,28 +143,26 @@ void communicate(int connection, struct Arguments* args) {
 		}
 
 		// Can write
-		if (canWrite && outstandingBytes < maxOutstandingBytes) {
+		if (canWrite && (outstandingBytes < maxOutstandingBytes) && (quit == 0)) {
 			writeInfo = write_to_socket(writeBuffer, connection, reqSize, (maxOutstandingBytes - outstandingBytes), false);
 			outstandingBytes += writeInfo.totalBytes;
 			totalBytesWritten += writeInfo.totalBytes;
-			wait = -1;
+			wait = 1000;
 
 			if (writeInfo.wholeReqs > 0) {
 				outstandingReqs += writeInfo.wholeReqs;
 			}
-
-			if (writeInfo.spareBytes > 0 && ((totalBytesWritten % reqSize) == 0)) {
-				outstandingReqs += 1;
-			}
 		}
 	}
 
-	// tell server we are done reading data
-	client_once(NOTIFY);
 	const bench_t elaspedTime = now() - bench.total_start;
+	
+	// Needed upon a kill
+	args->count = numReqsRead > args->count ? args->count : numReqsRead;
 	printf("Total duration:     %lld\n", elaspedTime / 1000);
 	evaluateClient(times, args);
-	// cleanup(connection, buffer);
+	cleanup(connection);
+	fflush(stdout);
 }
 
 void setup_socket(int connection, char* socketPath) {
@@ -206,9 +214,6 @@ int create_connection(char* socketPath) {
 	// The connection socket (file descriptor) that we will return
 	int connection;
 
-	// Wait until the server is listening on the socket
-	client_once(WAIT);
-
 	// Get a new socket from the OS
 	// Arguments:
 	// 1. The family of the socket (AF_UNIX for UNIX-domain sockets)
@@ -219,7 +224,8 @@ int create_connection(char* socketPath) {
 	connection = socket(AF_UNIX, SOCK_STREAM, 0);
 
 	if (connection == -1) {
-		throw("Error opening socket on client-side");
+		printf("errno %d\n", errno);
+		return -1;
 	}
 
 	setup_socket(connection, socketPath);
@@ -230,7 +236,9 @@ int create_connection(char* socketPath) {
 int main(int argc, char* argv[]) {
 	cpu_set_t cpuset;  // Set of CPUs
   	CPU_ZERO(&cpuset);  // Initialize the set to empty
-	CPU_SET(1, &cpuset);
+	
+	CPU_SET(3, &cpuset);
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
 		perror("sched_setaffinity");
@@ -239,13 +247,38 @@ int main(int argc, char* argv[]) {
 	
 	// File descriptor for the socket over which
 	// the communciation will happen with the client
-	int connection;
+	int connection = -1;
+	
+	int socketFifo = -1;
+	void *buffer = malloc(1);
 
 	// For command-line arguments
 	struct Arguments args;
 	parse_arguments(&args, argc, argv);
 
-	connection = create_connection(READ_SOCKET_PATH);
+	struct sigaction signal_action;
+	setup_client_signals(&signal_action);
+	
+	socketFifo = open_fifo(SOCKET_FIFO_PATH, O_RDWR);
+	if (read(socketFifo, buffer, 1) == -1) {
+		throw("bad read");
+	}
+
+	while(connection == -1) {
+		connection = create_connection(READ_SOCKET_PATH);
+	}
+
+	struct sigaction quit_signal_action;
+    quit_signal_action.sa_handler = quit_signal_handler;
+    
+	if (sigaction(SIGINT, &quit_signal_action, NULL) != 0) {
+        return EXIT_FAILURE;
+    }
+
+	signal(SIGPIPE, quit_signal_handler);
+	signal(SIGCHLD, SIG_IGN);
+	signal(SIGTTIN, SIG_IGN);
+
 	communicate(connection, &args);
 
 	return EXIT_SUCCESS;

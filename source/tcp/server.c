@@ -12,6 +12,29 @@
 #include "common/common.h"
 #include "common/sockets.h"
 
+volatile int quit = 0;
+
+static void quit_signal_handler(int signal_number) {
+    quit = 1;
+}
+
+void cleanup(int connection) {
+	if (close(connection) == -1) {
+		return;
+	}
+
+	return;
+}
+
+bool checkPoll(struct pollfd* pfds, int numPolled, int timeToWait) {
+	int ret = poll(pfds, numPolled, timeToWait);
+	if (ret == -1) {
+		return false;
+	}
+
+	return true;
+}
+
 void print_address(struct addrinfo *address_info) {
 	char *type;
 	void *address;
@@ -107,12 +130,12 @@ get_address(struct addrinfo *server_info, int *socket_descriptor) {
 	return valid_address;
 }
 
-void cleanup(int descriptor) {
-	close(descriptor);
-}
-
 void setup_socket(int socket_descriptor) {
 	set_socket_both_buffer_sizes(socket_descriptor);
+
+	if (set_io_flag(socket_descriptor, O_NONBLOCK) == -1) {
+		throw("Error setting socket to non-blocking on client-side");
+	}
 }
 
 int accept_communication(int socket_descriptor) {
@@ -144,7 +167,7 @@ int accept_communication(int socket_descriptor) {
 	// clang-format on
 
 	if (connection == -1) {
-		throw("Error accepting");
+		return -1;
 	}
 
 	
@@ -153,9 +176,6 @@ int accept_communication(int socket_descriptor) {
 	// Don't need the main server descriptor anymore at this
 	// point because we'll only communicate to the one client
 	// for this benchmark.
-	close(socket_descriptor);
-
-
 	return connection;
 }
 
@@ -165,7 +185,15 @@ void communicate(int descriptor, struct Arguments *args) {
 	void *readBuffer = malloc(bufferSize);
 
 	struct Benchmarks bench;
+	bench_t endTime = 0;
 	setup_benchmarks(&bench);
+
+	struct pollfd *pfds;
+	pfds = (struct pollfd*)malloc(1 * sizeof(struct pollfd));
+
+	// See if we can read anything
+	pfds[0].fd = descriptor;
+	pfds[0].events = POLLIN;
 
 	ssize_t outstandingBytes = 0;
 	ssize_t maxOutstandingBytes = reqSize * args->rate;
@@ -173,7 +201,20 @@ void communicate(int descriptor, struct Arguments *args) {
 	ssize_t totalBytesRead = 0;
 	ssize_t totalBytesWritten = 0;
 
-	while(totalBytesWritten < maxBytes) {
+	while((totalBytesWritten < maxBytes) && (quit == 0)) {
+		// Need to log time before a poll
+		endTime = now();
+		
+		if (!checkPoll(pfds, 1, 1000)) {
+			break;
+		}
+
+		if (quit != 0) {
+			break;
+		}
+		
+		int canRead = (pfds[0].revents & POLLIN);
+		int canWrite = (pfds[0].revents & POLLOUT);
 		struct socketMetaData readInfo = {0, 0, 0, 0};
 		struct socketMetaData writeInfo = {0, 0, 0, 0};
 		size_t toRead = maxOutstandingBytes;
@@ -183,23 +224,30 @@ void communicate(int descriptor, struct Arguments *args) {
 			toRead = outstandingBytes;
 		}
 
-		readInfo = read_from_socket(readBuffer, descriptor, reqSize, toRead, false);
-		totalBytesRead += readInfo.totalBytes;
-		outstandingBytes += readInfo.totalBytes;
+		if (canRead && (quit == 0)) {
+			readInfo = read_from_socket(readBuffer, descriptor, reqSize, toRead, true);
+			totalBytesRead += readInfo.totalBytes;
+			outstandingBytes += readInfo.totalBytes;
 
-		if (readInfo.totalBytes != 0) {
-			toWrite += readInfo.totalBytes;
+			if (readInfo.totalBytes != 0) {
+				toWrite += readInfo.totalBytes;
+				// When we can read, only then do we care that we can write
+				pfds[0].events = POLLIN | POLLOUT;
+			}
 		}
 
-		writeInfo = write_to_socket(readBuffer, descriptor, reqSize, toWrite, false);
-		totalBytesWritten += writeInfo.totalBytes;
-		outstandingBytes -= writeInfo.totalBytes;
+		if (canWrite && (quit == 0)) {
+			writeInfo = write_to_socket(readBuffer, descriptor, reqSize, toWrite, true);
+			totalBytesWritten += writeInfo.totalBytes;
+			outstandingBytes -= writeInfo.totalBytes;
+		}
 	}
 	
 	// before closing connection, wait for client to finish
-	server_once(WAIT);
-	evaluateServer(&bench, args->count);
-	close(descriptor);
+	ssize_t numReqs = totalBytesWritten / reqSize;
+	evaluateServer(&bench, numReqs, endTime);
+	cleanup(descriptor);
+	printf("closed\n");
 }
 
 void get_server_information(struct addrinfo **server_info) {
@@ -282,7 +330,7 @@ int create_socket() {
 
 	// If we didn't actually find a valid address
 	if (valid_address == NULL) {
-		throw("Error finding valid address");
+		return -1;
 	}
 
 	// Now that we have a socket and an address bound to it, we
@@ -290,9 +338,8 @@ int create_socket() {
 	// incoming connections on this port.
 	// Allow up to ten connections to queue up until the server
 	// accepts them (the OS limit is often between 10 and 20)
-
 	if (listen(socket_descriptor, 10) == 1) {
-		throw("Error listening on given socket!");
+		return -1;
 	}
 
 	return socket_descriptor;
@@ -304,6 +351,7 @@ int main(int argc, char *argv[]) {
 
 	// Set the CPU affinity to core 0 (first core)
 	CPU_SET(0, &cpuset);
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
 		perror("sched_setaffinity");
@@ -311,26 +359,45 @@ int main(int argc, char *argv[]) {
 	}
 	
 	// File-descriptor to the server socket
-	int socket_descriptor;
+	int socket_descriptor = -1;
+	int connection = -1;
 
-	// File-descriptor for the socket over which
-	// client-communication will take place
-	int connection;
+	int tcpFifo = -1;
+	void *buffer = malloc(1);
 
 	// Command line arguments
 	struct Arguments args;
-
 	parse_arguments(&args, argc, argv);
 
-	socket_descriptor = create_socket();
-	
-	server_once(NOTIFY);
-	server_once(WAIT);
-	
-	connection = accept_communication(socket_descriptor);
-	
-	server_once(NOTIFY);
+	struct sigaction signal_action;
+	setup_server_signals(&signal_action);
 
+	while (socket_descriptor == -1) {
+		socket_descriptor = create_socket();
+	}
+	
+	tcpFifo = open_fifo(TCP_FIFO_PATH, O_RDWR);
+	if (write(tcpFifo, buffer, 1) <= 0) {
+		throw("badWrite");
+	}
+
+	while(connection == -1) {
+		connection = accept_communication(socket_descriptor);
+	}
+
+	close(socket_descriptor);
+
+	struct sigaction quit_signal_action;
+    quit_signal_action.sa_handler = quit_signal_handler;
+
+	if (sigaction(SIGINT, &quit_signal_action, NULL) != 0) {
+        return EXIT_FAILURE;
+    }
+
+	signal(SIGPIPE, quit_signal_handler);
+	signal(SIGCHLD, SIG_IGN);
+	signal(SIGTTIN, SIG_IGN);
+    
 	communicate(connection, &args);
 
 	return EXIT_SUCCESS;

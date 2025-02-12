@@ -54,7 +54,7 @@ void analyze_array(unsigned long long arr[], size_t size, size_t rate) {
 
   // Find the sum of all elements, prevent overflow
   for (i = 0; i < size; i++) {
-	double toAdd = (arr[i] / (double)size);
+	double toAdd = (((double)arr[i] / (double)size) / 1000.0);
     sum += toAdd;
   }
 
@@ -111,12 +111,15 @@ void evaluate(Benchmarks* bench, Arguments* args) {
 
 void evaluateClient(bench_t *diffs, Arguments* args) {
 	assert(args->count > 0);
+	printf("numReqs Client: %d\n", args->count);
 	analyze_array((unsigned long long*)diffs, args->count, args->rate);
 }
 
-void evaluateServer(Benchmarks *bench, size_t numReqs) {
-	const bench_t total_time = now() - bench->total_start;
+void evaluateServer(Benchmarks *bench, size_t numReqs, bench_t endTime) {
+	const bench_t total_time = endTime - bench->total_start;
 	int messageRate = (int)(numReqs / (total_time / 1e9));
+	
+	printf("numReqs Server: %ld\n", numReqs);
 	printf("Total duration:     %.3f\tms\n", total_time / 1e6);
 	printf("Message rate:       %d\tmsg/s\n", messageRate);
 }

@@ -19,11 +19,12 @@ struct pipeMetaData read_from_pipe(void *buffer, int stream, size_t chunk, size_
 	}
 
 	if (numBytesToRead < 0) {
-		throw("negative bytes to read");
+		return toReturn;
 	}
 
 	while (total_bytes_read < numBytesToRead) {
 		size_t canRead = chunk;
+		bytes_read = 0;
 
 		if ((numBytesToRead - total_bytes_read) < chunk) {
 			canRead = (numBytesToRead - total_bytes_read);
@@ -31,17 +32,8 @@ struct pipeMetaData read_from_pipe(void *buffer, int stream, size_t chunk, size_
 
 		bytes_read = read(stream, buffer + total_bytes_read, canRead);
 
-		if (bytes_read == 0) {
+		if (bytes_read <= 0) {
 			break;
-		}
-
-		if (bytes_read < 0 && (errno == EAGAIN)) {
-			break;
-		}
-
-		if (bytes_read < 0)
-		{
-			exit(1);
 		}
 
 		total_bytes_read += bytes_read;
@@ -60,17 +52,17 @@ struct pipeMetaData write_to_pipe(void *buffer, int stream, size_t chunk, size_t
 	
 	struct pipeMetaData toReturn = {0, 0, 0};
 
-
 	if (numBytesToWrite == 0) {
 		return toReturn;
 	}
 
 	if (numBytesToWrite < 0) {
-		throw("negative bytes to write");
+		return toReturn;
 	}
 
 	while (total_bytes_written < numBytesToWrite) {
 		size_t canWrite = chunk;
+		bytes_written = 0;
 
 		if ((numBytesToWrite - total_bytes_written) < chunk) {
 			canWrite = (numBytesToWrite - total_bytes_written);
@@ -78,16 +70,8 @@ struct pipeMetaData write_to_pipe(void *buffer, int stream, size_t chunk, size_t
 
 		bytes_written = write(stream, buffer + total_bytes_written, canWrite);
 
-		if (bytes_written == 0) {
+		if (bytes_written <= 0) {
 			break;
-		}		
-
-		if (bytes_written < 0 && (errno == EAGAIN)) {
-        	break;
-      	}
-
-		if (bytes_written < 0) {
-			exit(1);
 		}
 
 		total_bytes_written += bytes_written;

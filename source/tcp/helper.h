@@ -24,6 +24,8 @@
 #define WRITE_PORT "6970"
 #define HOST "localhost"
 
+#define TCP_FIFO_PATH "/tmp/tcp_fifo"
+
 struct socketMetaData {
     size_t wholeReqs;
     size_t spareBytes;
@@ -33,5 +35,6 @@ struct socketMetaData {
 
 struct socketMetaData read_from_socket(void *buffer, int stream, size_t chunk, size_t numBytesToRead, bool nonBlock);
 struct socketMetaData write_to_socket(void *buffer, int stream, size_t chunk, size_t numBytesToWrite, bool nonBlock);
+int open_fifo(const char* path, int flag);
 
 #endif

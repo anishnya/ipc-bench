@@ -34,15 +34,22 @@ def graphLine(xlabel, ylabel, filename, data):
         plotExpo(xlabel, ylabel, filename, v, k)
 
 def graphMultipleLines(xlabel, ylabel, filename, data):
-    for k,v in data.items():
-        plt.plot(v[0], v[1], marker='o', label=k)
+    markers = ['o', 's', 'p', 'h', 'd', 'x', '^']
+    linestyles = ['-', '--', '-.', ':']
+    
+    plt.figure(figsize=(2.6, 2))
+    plt.ticklabel_format(style='sci', axis="x", scilimits=(0,0))
+    
+    for index, (k, v) in enumerate(data.items()):
+        plt.plot(v[0], v[1], marker=markers[index], linestyle=linestyles[index], label=k)
 
     # Add labels and title
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
 
-    # Add legend
-    plt.legend()
+    plt.ylim(top=125)
 
-    plt.savefig("graphs/" + filename + ".png", dpi=300, bbox_inches='tight')
+    # Add legend
+    plt.legend(prop={'size': 8})
+    plt.savefig("graphs/" + filename + ".pdf", bbox_inches='tight')
     plt.clf()
